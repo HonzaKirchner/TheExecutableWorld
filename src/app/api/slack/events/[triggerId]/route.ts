@@ -1,6 +1,7 @@
 import { after, type NextRequest } from "next/server";
 
 import { answerSlackMessage } from "@/lib/agent/slack";
+import { debugScope, preview } from "@/lib/log";
 import {
   isHumanMessage,
   verifySlackSignature,
@@ -8,96 +9,203 @@ import {
 } from "@/lib/slack-events";
 import { getSlackTriggerContext, recordTriggerEvent } from "@/lib/triggers";
 
+const log = debugScope("slack.webhook");
+
 /**
- * The agent's run has to fit in here, and a run that calls a few tools takes
- * far longer than a page render. Vercel caps this by plan, so a deployment
- * that allows less will cut a long run short.
+ * The whole pipeline — the trigger lookup, the signature check and the agent's
+ * run — happens after the response, so all of it has to fit in here. Vercel
+ * caps this by plan, so a deployment that allows less will cut a long run short.
  */
 export const maxDuration = 300;
 
 /**
  * Slack's Events API calls this for one agent — the trigger id in the path
- * says which. Slack expects a 200 within three seconds and retries otherwise,
- * so the request itself does nothing but check the signature and accept the
- * event; the agent runs in `after`, once Slack has its 200.
+ * says which.
+ *
+ * Slack gives the endpoint three seconds and retries on a timeout, and the
+ * work behind this URL cannot be made to fit: the trigger lookup alone can
+ * take seconds on a cold process, before the agent has even started. So the
+ * request does the least it can — read the body, answer the one event that
+ * needs an answer in this response — and hands everything else to `after`.
+ *
+ * The cost of that is deliberate: the 200 goes out before the signature has
+ * been checked, so it says "received", not "accepted". Nothing is acted on
+ * until `processEvent` has verified the request; an unsigned one just gets a
+ * 200 and is dropped a moment later. See `processEvent`.
  */
 export async function POST(
   request: NextRequest,
   { params }: RouteContext<"/api/slack/events/[triggerId]">,
 ) {
   const { triggerId } = await params;
-  const context = await getSlackTriggerContext(triggerId);
-  if (!context?.signingSecret) {
-    return new Response("Unknown trigger.", { status: 404 });
-  }
 
-  // The signature covers the raw body, so read it as text before parsing.
+  // The body has to be read here: once the response is sent, the stream is no
+  // longer readable. It's also cheap, unlike everything else we used to do
+  // first.
   const body = await request.text();
-  const valid = verifySlackSignature({
-    signingSecret: context.signingSecret,
-    timestamp: request.headers.get("x-slack-request-timestamp"),
-    signature: request.headers.get("x-slack-signature"),
-    body,
+  const retry = request.headers.get("x-slack-retry-num");
+
+  log("request", {
+    triggerId,
+    bytes: body.length,
+    retry,
+    retryReason: request.headers.get("x-slack-retry-reason"),
   });
-  if (!valid) {
-    return new Response("Bad signature.", { status: 401 });
-  }
 
   let envelope: SlackEventEnvelope;
   try {
     envelope = JSON.parse(body);
   } catch {
+    log("rejected: malformed body", { triggerId, body: preview(body) });
     return new Response("Malformed body.", { status: 400 });
   }
 
-  // Sent once when the URL is saved into the app's manifest.
+  // Sent once when the URL is saved into the app's manifest. The challenge has
+  // to come back in this response, so this is the one path that can't be
+  // deferred — and it answers without checking the signature, since that would
+  // mean the slow lookup we're here to avoid. Echoing Slack's own nonce back
+  // reveals nothing and changes nothing.
   if (envelope.type === "url_verification" && envelope.challenge) {
+    log("url_verification answered (unverified by design)", { triggerId });
     return Response.json({ challenge: envelope.challenge });
   }
 
-  // A retry means our first response was late, not that the reply is missing —
-  // answering again would post it twice.
-  if (request.headers.get("x-slack-retry-num")) {
+  // Now that the 200 is immediate, a retry really does mean what this assumed
+  // all along: Slack missed our response, not that the event went unhandled.
+  // Answering again would post the reply twice.
+  if (retry) {
+    log("ignored: retry of an event we already received", {
+      triggerId,
+      retry,
+      reason: request.headers.get("x-slack-retry-reason"),
+    });
     return new Response(null, { status: 200 });
   }
 
   if (envelope.type !== "event_callback") {
+    log("ignored: not an event_callback", { triggerId, envelopeType: envelope.type });
     return new Response(null, { status: 200 });
   }
 
-  // The manifest declares which app this URL belongs to, but nothing stops an
-  // app with the same signing secret — i.e. this very app — from being the
-  // only one that can get here. Check anyway; it's cheap.
-  if (context.slackAppId && envelope.api_app_id && envelope.api_app_id !== context.slackAppId) {
-    return new Response("Wrong app.", { status: 403 });
-  }
-
-  const event = envelope.event;
-  if (event?.type) {
-    await recordTriggerEvent(context.triggerId, event.type).catch(() => {});
-  }
-
-  // Only a person talking to the agent gets an answer. Other subscribed
-  // events (reactions, joins, channel chatter) are received and, for now,
-  // left at that.
-  if (!event || !isHumanMessage(event) || !event.channel || !event.ts) {
-    return new Response(null, { status: 200 });
-  }
-
-  if (!context.botToken) {
-    // Slack can only deliver events once the app is installed, so this means
-    // the install happened outside the app. Nothing we can say back.
-    console.warn(`Agent ${context.agentId} received an event but has no bot token.`);
-    return new Response(null, { status: 200 });
-  }
-
-  // Answer once Slack has its 200. `answerSlackMessage` handles its own
-  // failures — it has to, because by now nothing it does can change the
-  // response, and the person in the thread is the only one who'd notice.
-  const botToken = context.botToken;
-  const channel = event.channel;
-  const ts = event.ts;
-  after(() => answerSlackMessage({ ...context, botToken }, { ...event, channel, ts }));
+  after(() =>
+    processEvent({
+      triggerId,
+      envelope,
+      body,
+      timestamp: request.headers.get("x-slack-request-timestamp"),
+      signature: request.headers.get("x-slack-signature"),
+    }),
+  );
 
   return new Response(null, { status: 200 });
+}
+
+/**
+ * Everything that used to happen before the 200. Runs once Slack has its
+ * response, so nothing here can change it — a rejection is a log line and
+ * nothing else, and a failure that reaches the person does so in the thread.
+ */
+async function processEvent(input: {
+  triggerId: string;
+  envelope: SlackEventEnvelope;
+  body: string;
+  timestamp: string | null;
+  signature: string | null;
+}) {
+  const { triggerId, envelope } = input;
+
+  try {
+    const context = await getSlackTriggerContext(triggerId);
+    if (!context?.signingSecret) {
+      // Either no Slack trigger has this id, or the agent row has no signing
+      // secret — which means its Slack app was never finished being set up.
+      log("dropped: unknown trigger or no signing secret", {
+        triggerId,
+        foundTrigger: Boolean(context),
+      });
+      return;
+    }
+
+    // The signature covers the raw bytes, which is why the body is passed
+    // through as text rather than re-serialised from `envelope`.
+    const valid = verifySlackSignature({
+      signingSecret: context.signingSecret,
+      timestamp: input.timestamp,
+      signature: input.signature,
+      body: input.body,
+    });
+    if (!valid) {
+      // `verifySlackSignature` has already said which check failed.
+      log("dropped: bad signature", { agent: context.agentHandle, bytes: input.body.length });
+      return;
+    }
+
+    // The manifest declares which app this URL belongs to, but nothing stops an
+    // app with the same signing secret — i.e. this very app — from being the
+    // only one that can get here. Check anyway; it's cheap.
+    if (context.slackAppId && envelope.api_app_id && envelope.api_app_id !== context.slackAppId) {
+      log("dropped: event is for another Slack app", {
+        agent: context.agentHandle,
+        expected: context.slackAppId,
+        received: envelope.api_app_id,
+      });
+      return;
+    }
+
+    const event = envelope.event;
+    log("event", {
+      agent: context.agentHandle,
+      eventId: envelope.event_id,
+      type: event?.type,
+      subtype: event?.subtype,
+      channel: event?.channel,
+      channelType: event?.channel_type,
+      user: event?.user,
+      botId: event?.bot_id,
+      ts: event?.ts,
+      threadTs: event?.thread_ts,
+      text: preview(event?.text, 80),
+    });
+
+    if (event?.type) {
+      await recordTriggerEvent(context.triggerId, event.type).catch((error) => {
+        log("could not record the event on the trigger", { error });
+      });
+    }
+
+    // Only a person talking to the agent gets an answer. Other subscribed
+    // events (reactions, joins, channel chatter) are received and, for now,
+    // left at that.
+    if (!event || !isHumanMessage(event) || !event.channel || !event.ts) {
+      log("ignored: not a message the agent answers", {
+        agent: context.agentHandle,
+        // Which of the four conditions failed. `isHumanMessage` says why on its own.
+        hasEvent: Boolean(event),
+        human: event ? isHumanMessage(event) : false,
+        hasChannel: Boolean(event?.channel),
+        hasTs: Boolean(event?.ts),
+      });
+      return;
+    }
+
+    if (!context.botToken) {
+      // Slack can only deliver events once the app is installed, so this means
+      // the install happened outside the app. Nothing we can say back.
+      console.warn(`Agent ${context.agentId} received an event but has no bot token.`);
+      return;
+    }
+
+    // `answerSlackMessage` handles its own failures — it has to, because the
+    // person in the thread is the only one who'd notice.
+    await answerSlackMessage(
+      { ...context, botToken: context.botToken },
+      { ...event, channel: event.channel, ts: event.ts },
+    );
+  } catch (error) {
+    // Nothing above is allowed to throw past here. Slack has its 200 and will
+    // not retry, so an escaping error would lose the message with no trace
+    // beyond an unhandled rejection.
+    console.error(`Slack event for trigger ${triggerId} failed`, error);
+    log("processing failed", { triggerId, error });
+  }
 }

@@ -1,6 +1,9 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
+import { debugScope, preview } from "@/lib/log";
 import { slackPost } from "@/lib/slack";
+
+const log = debugScope("slack.events");
 
 /** Requests older than this are replayed ones, whatever their signature says. */
 const MAX_AGE_SECONDS = 5 * 60;
@@ -18,11 +21,25 @@ export function verifySlackSignature(input: {
   body: string;
   now?: number;
 }) {
-  if (!input.timestamp || !input.signature) return false;
+  if (!input.timestamp || !input.signature) {
+    // Not from Slack at all — a browser hitting the URL, or a proxy that
+    // strips unknown headers on the way in.
+    log("signature: headers missing", {
+      timestamp: Boolean(input.timestamp),
+      signature: Boolean(input.signature),
+    });
+    return false;
+  }
 
   const timestamp = Number(input.timestamp);
   const now = input.now ?? Math.floor(Date.now() / 1000);
   if (!Number.isFinite(timestamp) || Math.abs(now - timestamp) > MAX_AGE_SECONDS) {
+    // Usually a replayed request — or a machine whose clock has drifted.
+    log("signature: timestamp out of range", {
+      timestamp: input.timestamp,
+      skewSeconds: Number.isFinite(timestamp) ? now - timestamp : undefined,
+      maxSeconds: MAX_AGE_SECONDS,
+    });
     return false;
   }
 
@@ -32,7 +49,14 @@ export function verifySlackSignature(input: {
 
   const a = Buffer.from(expected);
   const b = Buffer.from(input.signature);
-  return a.length === b.length && timingSafeEqual(a, b);
+  const matches = a.length === b.length && timingSafeEqual(a, b);
+  if (!matches) {
+    // The secret is the usual culprit: the app was reinstalled, or the one in
+    // the database belongs to a different Slack app. A proxy that re-encodes
+    // the body would do it too, since the digest covers the raw bytes.
+    log("signature: digest mismatch", { bodyBytes: input.body.length });
+  }
+  return matches;
 }
 
 /** The outer object Slack posts. Which fields are present depends on `type`. */
@@ -42,6 +66,8 @@ export type SlackEventEnvelope = {
   challenge?: string;
   /** `event_callback` only. */
   api_app_id?: string;
+  /** `event_callback` only. Slack's id for this delivery, stable across retries. */
+  event_id?: string;
   team_id?: string;
   event?: SlackMessageEvent;
 };
@@ -96,8 +122,20 @@ export async function fetchThread(input: {
         },
       },
     );
+    log("thread fetched", {
+      channel: input.channel,
+      threadTs: input.threadTs,
+      messages: response.messages?.length ?? 0,
+    });
     return response.messages ?? null;
-  } catch {
+  } catch (error) {
+    // Expected when the app lacks the history scope for this channel type;
+    // the caller falls back to the single delivered message.
+    log("thread not fetched, falling back to the delivered message", {
+      channel: input.channel,
+      threadTs: input.threadTs,
+      error,
+    });
     return null;
   }
 }
@@ -110,7 +148,13 @@ export async function replyInThread(input: {
   threadTs?: string;
   text: string;
 }) {
-  await slackPost("chat.postMessage", {
+  log("posting reply", {
+    channel: input.channel,
+    threadTs: input.threadTs ?? input.ts,
+    chars: input.text.length,
+    text: preview(input.text),
+  });
+  const response = await slackPost<{ ok: boolean; ts?: string }>("chat.postMessage", {
     token: input.botToken,
     json: {
       channel: input.channel,
@@ -118,4 +162,5 @@ export async function replyInThread(input: {
       text: input.text,
     },
   });
+  log("reply posted", { channel: input.channel, ts: response.ts });
 }

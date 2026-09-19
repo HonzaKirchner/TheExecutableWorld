@@ -4,6 +4,9 @@ import type { Agent } from "@/lib/agents";
 import { buildInstructions, type TriggerContext } from "@/lib/agent/prompt";
 import { MissingApiKeyError, resolveModel } from "@/lib/agent/providers";
 import { loadAgentTools } from "@/lib/agent/tools";
+import { debugScope, preview } from "@/lib/log";
+
+const log = debugScope("agent.run");
 
 /**
  * How many times the model may call tools and look at the results before it
@@ -38,6 +41,20 @@ export async function runAgent(input: {
   const model = resolveModel(input.agent.model);
   const tools = await loadAgentTools(input.agent.id);
 
+  log("starting", {
+    agent: input.agent.handle,
+    model: input.agent.model,
+    trigger: input.trigger.description,
+    messages: input.messages.length,
+    tools: Object.keys(tools.toolSet).join(",") || "none",
+    // A tool the agent expected to have and doesn't is a common reason for an
+    // answer that says less than it should.
+    withheld: tools.withheld.map((tool) => tool.name).join(",") || "none",
+    unreachable:
+      tools.unreachable.map((server) => `${server.serverName}(${server.error})`).join(",") ||
+      "none",
+  });
+
   try {
     const result = await generateText({
       model,
@@ -50,6 +67,39 @@ export async function runAgent(input: {
       tools: tools.toolSet,
       stopWhen: stepCountIs(MAX_STEPS),
       timeout: TIMEOUT_MS,
+      onToolExecutionStart: ({ toolCall }) => {
+        log("tool call", { tool: toolCall.toolName, input: preview(JSON.stringify(toolCall.input)) });
+      },
+      onToolExecutionEnd: ({ toolCall, toolOutput, toolExecutionMs }) => {
+        // A tool that throws doesn't fail the run — the model sees the error
+        // and works around it — so this is the only place it shows up.
+        log(toolOutput.type === "tool-error" ? "tool failed" : "tool returned", {
+          tool: toolCall.toolName,
+          ms: toolExecutionMs,
+          ...(toolOutput.type === "tool-error"
+            ? { error: preview(String(toolOutput.error)) }
+            : { output: preview(JSON.stringify(toolOutput.output)) }),
+        });
+      },
+      onStepEnd: (step) => {
+        log("step", {
+          finishReason: step.finishReason,
+          toolCalls: step.toolCalls.map((call) => call.toolName).join(",") || "none",
+          inputTokens: step.usage.inputTokens,
+          outputTokens: step.usage.outputTokens,
+          text: preview(step.text, 80),
+        });
+      },
+    });
+
+    log("finished", {
+      agent: input.agent.handle,
+      steps: result.steps.length,
+      finishReason: result.finishReason,
+      totalTokens: result.usage.totalTokens,
+      // `length` or `tool-calls` here means the model was cut off — by
+      // MAX_STEPS or the provider — rather than deciding it was done.
+      chars: result.text.trim().length,
     });
 
     return {
@@ -69,6 +119,9 @@ export async function runAgent(input: {
         }));
       }),
     };
+  } catch (error) {
+    log("failed", { agent: input.agent.handle, error });
+    throw error;
   } finally {
     await tools.close();
   }

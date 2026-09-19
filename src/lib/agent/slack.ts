@@ -2,8 +2,11 @@ import type { ModelMessage } from "ai";
 
 import { getAgentById } from "@/lib/agents";
 import { describeRunFailure, runAgent } from "@/lib/agent/run";
+import { debugScope, preview } from "@/lib/log";
 import { fetchThread, replyInThread, type SlackMessageEvent } from "@/lib/slack-events";
 import type { SlackTriggerContext } from "@/lib/triggers";
+
+const log = debugScope("slack.answer");
 
 /** How much of a thread to hand the model. Oldest messages are dropped first. */
 const THREAD_LIMIT = 50;
@@ -22,6 +25,14 @@ export async function answerSlackMessage(
   event: SlackMessageEvent & { channel: string; ts: string },
 ) {
   const threadTs = event.thread_ts ?? event.ts;
+  const startedAt = Date.now();
+  log("started", {
+    agent: context.agentHandle,
+    channel: event.channel,
+    ts: event.ts,
+    threadTs,
+    user: event.user,
+  });
 
   const agent = await getAgentById(context.agentId);
   if (!agent) {
@@ -50,12 +61,23 @@ export async function answerSlackMessage(
       `Agent ${agent.handle} answered in ${event.channel}: ${run.steps} step(s), ` +
         `${run.toolCalls.length} tool call(s)`,
     );
+    log("run finished", {
+      agent: agent.handle,
+      ms: Date.now() - startedAt,
+      steps: run.steps,
+      toolCalls: run.toolCalls.map((call) => `${call.name}${call.ok ? "" : "!"}`).join(","),
+      chars: run.text.length,
+      // The empty case is the one worth seeing: the model called tools and
+      // then said nothing, so the thread gets a bare "Done."
+      text: preview(run.text),
+    });
 
     // A run that only called tools and said nothing still owes the thread a
     // word, or the message looks unanswered.
     text = run.text || "Done.";
   } catch (error) {
     console.error(`Agent ${agent.handle} failed to answer`, error);
+    log("run failed", { agent: agent.handle, ms: Date.now() - startedAt, error });
     text = describeRunFailure(error);
   }
 
@@ -68,7 +90,11 @@ export async function answerSlackMessage(
       text: toMrkdwn(text),
     });
   } catch (error) {
+    // The last place a message can vanish: the run worked, the answer exists,
+    // and Slack refused to post it — a missing `chat:write`, or a channel the
+    // app was never added to.
     console.error(`Agent ${agent.handle} could not post its reply`, error);
+    log("reply failed", { agent: agent.handle, channel: event.channel, error });
   }
 }
 
@@ -109,6 +135,14 @@ async function buildMessages(
           { role: "user", content: `<@${message.user ?? "unknown"}>: ${body}` },
     );
   }
+
+  log("messages built", {
+    agent: context.agentHandle,
+    source: thread ? "thread" : "single event",
+    fetched: messages.length,
+    turns: turns.length,
+    ownTurns: turns.filter((turn) => turn.role === "assistant").length,
+  });
 
   // An empty thread would be rejected by every provider, and can happen when
   // the only message is a file with no text.
