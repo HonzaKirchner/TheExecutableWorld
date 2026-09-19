@@ -1,6 +1,7 @@
 import type { ModelMessage } from "ai";
 
 import { getAgentById } from "@/lib/agents";
+import { createProgressTracker, renderProgress } from "@/lib/agent/progress";
 import { isSilence } from "@/lib/agent/prompt";
 import { describeRunFailure, runAgent } from "@/lib/agent/run";
 import { debugScope, preview } from "@/lib/log";
@@ -8,6 +9,7 @@ import {
   fetchThread,
   mentionsUser,
   replyInThread,
+  updateReply,
   type SlackMessageEvent,
 } from "@/lib/slack-events";
 import type { SlackTriggerContext } from "@/lib/triggers";
@@ -30,6 +32,12 @@ const THREAD_LIMIT = 50;
  * things stand between it and a reply: the thread must have been started by
  * someone calling on the agent, which is decided here from the thread's root
  * message, and the agent itself must judge the message worth answering.
+ *
+ * Only an addressed run gets a live progress message, updated as tools are
+ * called and replaced with the final answer when it's done. A run the agent
+ * might stay silent on gets no placeholder — nothing appears until it's known
+ * there is something to say, so overhearing a thread never looks like the
+ * agent butting in to think out loud.
  */
 export async function answerSlackMessage(
   context: SlackTriggerContext & { botToken: string },
@@ -81,6 +89,40 @@ export async function answerSlackMessage(
     }
   }
 
+  // Posted before the run starts, so the person sees something is happening
+  // rather than watching a mention sit unanswered while it works.
+  let progressTs: string | undefined;
+  let progress: ReturnType<typeof createProgressTracker> | undefined;
+  if (addressed) {
+    try {
+      progressTs = await replyInThread({
+        botToken: context.botToken,
+        channel: event.channel,
+        ts: event.ts,
+        threadTs: event.thread_ts,
+        text: renderProgress([]),
+      });
+    } catch (error) {
+      log("could not post the progress placeholder, continuing without live updates", {
+        agent: agent.handle,
+        error,
+      });
+    }
+    if (progressTs) {
+      const placeholderTs = progressTs;
+      progress = createProgressTracker((text) =>
+        updateReply({
+          botToken: context.botToken,
+          channel: event.channel,
+          ts: placeholderTs,
+          text,
+        }).catch((error) => {
+          log("progress update failed", { agent: agent.handle, error });
+        }),
+      );
+    }
+  }
+
   let text: string;
   try {
     const run = await runAgent({
@@ -94,6 +136,7 @@ export async function answerSlackMessage(
         mayStaySilent: !addressed,
       },
       messages: buildMessages(context, event, thread),
+      onProgress: progress?.handle,
     });
 
     console.log(
@@ -131,14 +174,31 @@ export async function answerSlackMessage(
     text = describeRunFailure(error);
   }
 
+  // Every progress update handed to `publish` above is fire-and-forget, so
+  // one from late in the run could otherwise land after this final write and
+  // overwrite it with a stale "still working" state.
+  await progress?.settle();
+
   try {
-    await replyInThread({
-      botToken: context.botToken,
-      channel: event.channel,
-      ts: event.ts,
-      threadTs: event.thread_ts,
-      text: toMrkdwn(text),
-    });
+    if (progressTs) {
+      // Replaces the progress message with the answer, rather than leaving
+      // the tool trail behind it — the trail was for watching the run happen,
+      // not a record anyone needs once it's done.
+      await updateReply({
+        botToken: context.botToken,
+        channel: event.channel,
+        ts: progressTs,
+        text: toMrkdwn(text),
+      });
+    } else {
+      await replyInThread({
+        botToken: context.botToken,
+        channel: event.channel,
+        ts: event.ts,
+        threadTs: event.thread_ts,
+        text: toMrkdwn(text),
+      });
+    }
   } catch (error) {
     // The last place a message can vanish: the run worked, the answer exists,
     // and Slack refused to post it — a missing `chat:write`, or a channel the

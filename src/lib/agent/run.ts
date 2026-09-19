@@ -3,7 +3,7 @@ import { generateText, stepCountIs, type ModelMessage } from "ai";
 import type { Agent } from "@/lib/agents";
 import { buildInstructions, type TriggerContext } from "@/lib/agent/prompt";
 import { MissingApiKeyError, resolveModel } from "@/lib/agent/providers";
-import { loadAgentTools } from "@/lib/agent/tools";
+import { loadAgentTools, type ToolLabel } from "@/lib/agent/tools";
 import { debugScope, preview } from "@/lib/log";
 
 const log = debugScope("agent.run");
@@ -27,6 +27,23 @@ export type AgentRun = {
 };
 
 /**
+ * One thing worth telling a person watching the run live: a tool was called,
+ * or it came back. Nothing about the model's own thinking is reported — there
+ * is nothing to say between tool calls beyond "it's composing a reply", which
+ * a caller can show on its own without a callback for each step.
+ */
+export type RunProgress =
+  | { type: "tool-start"; callId: string; label: string }
+  | { type: "tool-end"; callId: string; label: string; ok: boolean };
+
+/** A human name for a tool call — the server it belongs to, not its arguments. */
+function labelFor(labels: Record<string, ToolLabel>, toolName: string) {
+  const label = labels[toolName];
+  if (!label) return toolName;
+  return `${label.serverName}: ${label.title ?? label.toolName}`;
+}
+
+/**
  * Runs the agent once and returns what it wants to say.
  *
  * This is the whole harness: every trigger builds `messages`, calls this, and
@@ -37,6 +54,8 @@ export async function runAgent(input: {
   agent: Agent;
   trigger: TriggerContext;
   messages: ModelMessage[];
+  /** Called as tools are used, so a caller can show the run happening live. */
+  onProgress?: (event: RunProgress) => void;
 }): Promise<AgentRun> {
   const model = resolveModel(input.agent.model);
   const tools = await loadAgentTools(input.agent.id);
@@ -67,10 +86,15 @@ export async function runAgent(input: {
       tools: tools.toolSet,
       stopWhen: stepCountIs(MAX_STEPS),
       timeout: TIMEOUT_MS,
-      onToolExecutionStart: ({ toolCall }) => {
+      onToolExecutionStart: ({ callId, toolCall }) => {
         log("tool call", { tool: toolCall.toolName, input: preview(JSON.stringify(toolCall.input)) });
+        input.onProgress?.({
+          type: "tool-start",
+          callId,
+          label: labelFor(tools.labels, toolCall.toolName),
+        });
       },
-      onToolExecutionEnd: ({ toolCall, toolOutput, toolExecutionMs }) => {
+      onToolExecutionEnd: ({ callId, toolCall, toolOutput, toolExecutionMs }) => {
         // A tool that throws doesn't fail the run — the model sees the error
         // and works around it — so this is the only place it shows up.
         log(toolOutput.type === "tool-error" ? "tool failed" : "tool returned", {
@@ -79,6 +103,12 @@ export async function runAgent(input: {
           ...(toolOutput.type === "tool-error"
             ? { error: preview(String(toolOutput.error)) }
             : { output: preview(JSON.stringify(toolOutput.output)) }),
+        });
+        input.onProgress?.({
+          type: "tool-end",
+          callId,
+          label: labelFor(tools.labels, toolCall.toolName),
+          ok: toolOutput.type !== "tool-error",
         });
       },
       onStepEnd: (step) => {

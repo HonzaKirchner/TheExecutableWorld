@@ -216,6 +216,7 @@ export async function fetchThread(input: {
   }
 }
 
+/** Returns the posted message's `ts`, so a caller can update it later. */
 export async function replyInThread(input: {
   botToken: string;
   channel: string;
@@ -223,7 +224,7 @@ export async function replyInThread(input: {
   ts: string;
   threadTs?: string;
   text: string;
-}) {
+}): Promise<string | undefined> {
   log("posting reply", {
     channel: input.channel,
     threadTs: input.threadTs ?? input.ts,
@@ -239,4 +240,22 @@ export async function replyInThread(input: {
     },
   });
   log("reply posted", { channel: input.channel, ts: response.ts });
+  return response.ts;
 }
+
+/**
+ * Rewrites a message already posted with `replyInThread` — how the live
+ * progress view and the final answer both land in the same bubble.
+ */
+export async function updateReply(input: {
+  botToken: string;
+  channel: string;
+  ts: string;
+  text: string;
+}) {
+  await slackPost("chat.update", {
+    token: input.botToken,
+    json: { channel: input.channel, ts: input.ts, text: input.text },
+  });
+}
+
