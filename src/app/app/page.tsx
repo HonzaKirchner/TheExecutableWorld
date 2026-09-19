@@ -1,10 +1,15 @@
-import { Plus, Bot } from "lucide-react";
+import Link from "next/link";
+import { Bot } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { auth } from "@/auth";
+import { listAgents } from "@/lib/agents";
+import { NewAgentDialog } from "@/components/new-agent-dialog";
+import { Badge } from "@/components/ui/badge";
 
-export default function AgentsPage() {
-  // No agents yet — this is where the user's list will be rendered.
-  const agents: { id: string; name: string }[] = [];
+export default async function AgentsPage() {
+  const session = await auth();
+  const workspaceId = session?.slack?.teamId;
+  const agents = workspaceId ? await listAgents(workspaceId) : [];
 
   return (
     <div className="animate-in fade-in slide-in-from-bottom-1 duration-500">
@@ -15,10 +20,7 @@ export default function AgentsPage() {
             The AI coworkers you&apos;ve created.
           </p>
         </div>
-        <Button className="gap-2 transition-all active:scale-[0.98]">
-          <Plus className="size-4" />
-          New agent
-        </Button>
+        <NewAgentDialog />
       </div>
 
       {agents.length === 0 ? (
@@ -30,8 +32,46 @@ export default function AgentsPage() {
           <p className="mt-1.5 max-w-xs text-sm text-muted-foreground">
             Create your first AI coworker to get started.
           </p>
+          <div className="mt-6">
+            <NewAgentDialog />
+          </div>
         </div>
-      ) : null}
+      ) : (
+        <ul className="mt-8 grid gap-3 sm:grid-cols-2">
+          {agents.map((agent, i) => (
+            <li
+              key={agent.id}
+              className="animate-in fade-in slide-in-from-bottom-1 duration-500 [animation-fill-mode:backwards]"
+              style={{ animationDelay: `${i * 40}ms` }}
+            >
+              <Link
+                href={`/app/${agent.id}`}
+                className="group flex h-full flex-col rounded-xl border bg-card p-5 transition-all hover:-translate-y-0.5 hover:border-border/80 hover:shadow-sm"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h2 className="truncate font-medium transition-colors group-hover:text-foreground">
+                      {agent.name}
+                    </h2>
+                    <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
+                      @{agent.handle}
+                    </p>
+                  </div>
+                  <Badge variant="secondary" className="shrink-0 font-mono text-[10px]">
+                    {agent.model}
+                  </Badge>
+                </div>
+
+                {agent.description ? (
+                  <p className="mt-3 line-clamp-2 text-sm text-muted-foreground">
+                    {agent.description}
+                  </p>
+                ) : null}
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
