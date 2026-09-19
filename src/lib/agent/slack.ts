@@ -1,9 +1,15 @@
 import type { ModelMessage } from "ai";
 
 import { getAgentById } from "@/lib/agents";
+import { isSilence } from "@/lib/agent/prompt";
 import { describeRunFailure, runAgent } from "@/lib/agent/run";
 import { debugScope, preview } from "@/lib/log";
-import { fetchThread, replyInThread, type SlackMessageEvent } from "@/lib/slack-events";
+import {
+  fetchThread,
+  mentionsUser,
+  replyInThread,
+  type SlackMessageEvent,
+} from "@/lib/slack-events";
 import type { SlackTriggerContext } from "@/lib/triggers";
 
 const log = debugScope("slack.answer");
@@ -19,10 +25,16 @@ const THREAD_LIMIT = 50;
  * the HTTP response, and every failure has to end in something said in the
  * thread. A person who @mentions an agent and gets silence has no way to tell
  * a crash from being ignored.
+ *
+ * `addressed` says whether the message named the agent. When it didn't, two
+ * things stand between it and a reply: the thread must have been started by
+ * someone calling on the agent, which is decided here from the thread's root
+ * message, and the agent itself must judge the message worth answering.
  */
 export async function answerSlackMessage(
   context: SlackTriggerContext & { botToken: string },
   event: SlackMessageEvent & { channel: string; ts: string },
+  addressed: boolean,
 ) {
   const threadTs = event.thread_ts ?? event.ts;
   const startedAt = Date.now();
@@ -32,6 +44,7 @@ export async function answerSlackMessage(
     ts: event.ts,
     threadTs,
     user: event.user,
+    addressed,
   });
 
   const agent = await getAgentById(context.agentId);
@@ -40,21 +53,47 @@ export async function answerSlackMessage(
     return;
   }
 
+  const thread = await fetchThread({
+    botToken: context.botToken,
+    channel: event.channel,
+    threadTs,
+    limit: THREAD_LIMIT,
+  });
+
+  // A message that didn't name the agent is only its business if the thread
+  // was opened by someone calling on it. The root message settles that, and
+  // nothing about the decision is left to the model.
+  //
+  // A thread we can't read counts as one we weren't invited to: the fallback
+  // to the single delivered message is fine for answering a mention, but it
+  // can't show how the thread began, and guessing would have the agent join
+  // conversations it was never called into.
+  if (!addressed) {
+    const root = thread?.[0];
+    if (!root || !mentionsUser(root.text, context.botUserId)) {
+      log("ignored: the thread was not started by a mention of the agent", {
+        agent: agent.handle,
+        channel: event.channel,
+        threadTs,
+        threadReadable: thread != null,
+      });
+      return;
+    }
+  }
+
   let text: string;
   try {
     const run = await runAgent({
       agent,
       trigger: {
-        description:
-          event.channel_type === "im"
-            ? "a direct message in Slack"
-            : "an @mention in a Slack channel",
+        description: describeTrigger(event, addressed),
         facts: [
           `The person who wrote to you is <@${event.user ?? "unknown"}>.`,
           "Your answer is posted in the thread, so keep it to what fits in a chat message.",
         ],
+        mayStaySilent: !addressed,
       },
-      messages: await buildMessages(context, event, threadTs),
+      messages: buildMessages(context, event, thread),
     });
 
     console.log(
@@ -71,6 +110,17 @@ export async function answerSlackMessage(
       // then said nothing, so the thread gets a bare "Done."
       text: preview(run.text),
     });
+
+    // Only offered when the agent wasn't spoken to, so a mention can never end
+    // in silence — see `mayStaySilent`.
+    if (!addressed && isSilence(run.text)) {
+      log("stayed out: the agent judged the message wasn't for it", {
+        agent: agent.handle,
+        channel: event.channel,
+        threadTs,
+      });
+      return;
+    }
 
     // A run that only called tools and said nothing still owes the thread a
     // word, or the message looks unanswered.
@@ -98,23 +148,23 @@ export async function answerSlackMessage(
   }
 }
 
+/** One line for the prompt about what woke the agent up. */
+function describeTrigger(event: SlackMessageEvent, addressed: boolean) {
+  if (event.channel_type === "im") return "a direct message in Slack";
+  if (addressed) return "an @mention in a Slack channel";
+  return "a new message in a Slack thread you were called into earlier";
+}
+
 /**
  * The conversation as the model should see it: the thread so far, with the
  * agent's own messages as its own turns. Falls back to the single message
- * Slack delivered when the thread can't be read (see `fetchThread`).
+ * Slack delivered when the thread couldn't be read (see `fetchThread`).
  */
-async function buildMessages(
+function buildMessages(
   context: SlackTriggerContext & { botToken: string },
   event: SlackMessageEvent & { channel: string; ts: string },
-  threadTs: string,
-): Promise<ModelMessage[]> {
-  const thread = await fetchThread({
-    botToken: context.botToken,
-    channel: event.channel,
-    threadTs,
-    limit: THREAD_LIMIT,
-  });
-
+  thread: SlackMessageEvent[] | null,
+): ModelMessage[] {
   const messages = thread ?? [event];
   const turns: ModelMessage[] = [];
 

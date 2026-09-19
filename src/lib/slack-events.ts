@@ -85,13 +85,89 @@ export type SlackMessageEvent = {
 };
 
 /**
- * Whether an event is a person talking to the agent — as opposed to the
- * agent's own messages echoing back, edits, joins, and the like.
+ * Whether an event is a person talking — as opposed to the agent's own
+ * messages echoing back, edits, joins, and the like.
  */
 export function isHumanMessage(event: SlackMessageEvent) {
   if (event.bot_id || event.subtype) return false;
-  if (event.type === "app_mention") return true;
-  return event.type === "message" && event.channel_type === "im";
+  return event.type === "app_mention" || event.type === "message";
+}
+
+/** Whether `text` mentions `userId`, in either of Slack's two mention forms. */
+export function mentionsUser(text: string | undefined, userId: string | null) {
+  if (!text || !userId) return false;
+  return new RegExp(`<@${userId}(\\|[^>]*)?>`).test(text);
+}
+
+/** A message that has a home to reply into. */
+export type AnswerableMessage = SlackMessageEvent & { channel: string; ts: string };
+
+export type MessageRouting =
+  /** Why the event is none of the agent's business. For the log, not for Slack. */
+  | { answer: false; reason: string }
+  /** `addressed`: the message named the agent, rather than merely reaching it. */
+  | { answer: true; addressed: boolean; event: AnswerableMessage };
+
+/**
+ * Whether this event is the agent's to answer.
+ *
+ * The agent is subscribed to every message in every conversation it is in, so
+ * most of what arrives here is other people's. Deciding what to act on is done
+ * in code, deterministically, and never by the model: a mention is answered, a
+ * DM is answered, and a reply in a thread is a *candidate* — whether the thread
+ * began with someone calling on the agent is settled by its root message, which
+ * only the caller can see (`answerSlackMessage`).
+ *
+ * Everything else — a message at the top level of a channel, someone else's
+ * thread — is dropped here without a single API call, which is what keeps a
+ * busy channel from costing anything.
+ */
+export function routeMessage(
+  event: SlackMessageEvent,
+  botUserId: string | null,
+): MessageRouting {
+  if (!isHumanMessage(event)) {
+    return { answer: false, reason: event.bot_id ? "a bot's message" : `subtype ${event.subtype}` };
+  }
+  if (!event.channel || !event.ts) {
+    return { answer: false, reason: "no channel or ts" };
+  }
+  // Carried through so the caller has the two fields proven present here,
+  // rather than asserting them again.
+  const answerable: AnswerableMessage = { ...event, channel: event.channel, ts: event.ts };
+
+  // Being named is being spoken to, wherever it happens.
+  if (event.type === "app_mention") return { answer: true, addressed: true, event: answerable };
+  if (event.channel_type === "im") {
+    return { answer: true, addressed: true, event: answerable };
+  }
+
+  // From here on it's an ordinary message in a channel, private channel or
+  // group DM — the firehose.
+
+  // Slack delivers a mention twice, once as `app_mention` and once as the
+  // channel's `message.*`. Answering both would post the reply twice, so the
+  // copy that carries the mention is dropped and the `app_mention` above wins.
+  if (mentionsUser(event.text, botUserId)) {
+    return { answer: false, reason: "already delivered as app_mention" };
+  }
+
+  // Without knowing our own user id we can't tell a mention from anything
+  // else, which makes both of the rules around this one unsafe. An install
+  // from before that id was recorded therefore behaves as it always did:
+  // mentions and DMs only.
+  if (!botUserId) {
+    return { answer: false, reason: "the agent's Slack user id is unknown" };
+  }
+
+  // Only replies inside a thread can belong to a conversation the agent was
+  // called into. A top-level message starts a thread that nobody has invited
+  // the agent to yet.
+  if (!event.thread_ts || event.thread_ts === event.ts) {
+    return { answer: false, reason: "not a reply in a thread" };
+  }
+
+  return { answer: true, addressed: false, event: answerable };
 }
 
 /**

@@ -2,11 +2,7 @@ import { after, type NextRequest } from "next/server";
 
 import { answerSlackMessage } from "@/lib/agent/slack";
 import { debugScope, preview } from "@/lib/log";
-import {
-  isHumanMessage,
-  verifySlackSignature,
-  type SlackEventEnvelope,
-} from "@/lib/slack-events";
+import { routeMessage, verifySlackSignature, type SlackEventEnvelope } from "@/lib/slack-events";
 import { getSlackTriggerContext, recordTriggerEvent } from "@/lib/triggers";
 
 const log = debugScope("slack.webhook");
@@ -173,18 +169,16 @@ async function processEvent(input: {
       });
     }
 
-    // Only a person talking to the agent gets an answer. Other subscribed
-    // events (reactions, joins, channel chatter) are received and, for now,
-    // left at that.
-    if (!event || !isHumanMessage(event) || !event.channel || !event.ts) {
-      log("ignored: not a message the agent answers", {
-        agent: context.agentHandle,
-        // Which of the four conditions failed. `isHumanMessage` says why on its own.
-        hasEvent: Boolean(event),
-        human: event ? isHumanMessage(event) : false,
-        hasChannel: Boolean(event?.channel),
-        hasTs: Boolean(event?.ts),
-      });
+    // The agent hears every message in every conversation it's in, so most of
+    // what arrives is other people's. `routeMessage` decides, without calling
+    // Slack, which ones are its business.
+    if (!event) {
+      log("ignored: event_callback with no event", { agent: context.agentHandle });
+      return;
+    }
+    const routing = routeMessage(event, context.botUserId);
+    if (!routing.answer) {
+      log("ignored", { agent: context.agentHandle, reason: routing.reason });
       return;
     }
 
@@ -199,7 +193,8 @@ async function processEvent(input: {
     // person in the thread is the only one who'd notice.
     await answerSlackMessage(
       { ...context, botToken: context.botToken },
-      { ...event, channel: event.channel, ts: event.ts },
+      routing.event,
+      routing.addressed,
     );
   } catch (error) {
     // Nothing above is allowed to throw past here. Slack has its 200 and will
