@@ -5,6 +5,7 @@ import type {
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 
+import { decryptOptional, encryptOptional } from "@/lib/crypto";
 import { db, ensureSchema } from "@/lib/db";
 
 /*
@@ -87,11 +88,12 @@ type ToolRow = {
   requires_approval: boolean;
 };
 
+/** As stored: the three secret columns are encrypted text (JSON inside). */
 type CredentialsRow = {
   oauth_state: string | null;
   code_verifier: string | null;
-  client_information: OAuthClientInformationMixed | null;
-  tokens: OAuthTokens | null;
+  client_information: string | null;
+  tokens: string | null;
   discovery: OAuthDiscoveryState | null;
 };
 
@@ -335,12 +337,24 @@ export async function loadCredentials(
 
   return {
     oauthState: row.oauth_state,
-    codeVerifier: row.code_verifier,
-    clientInformation: row.client_information,
-    tokens: row.tokens,
+    codeVerifier: decryptOptional(row.code_verifier),
+    clientInformation: parseSecret<OAuthClientInformationMixed>(row.client_information),
+    tokens: parseSecret<OAuthTokens>(row.tokens),
     discovery: row.discovery,
   };
 }
+
+function parseSecret<T>(stored: string | null): T | null {
+  const plain = decryptOptional(stored);
+  return plain == null ? null : (JSON.parse(plain) as T);
+}
+
+/** Which columns hold secrets, and so are encrypted on the way in. */
+const SECRET_COLUMNS = new Set<keyof McpCredentials>([
+  "codeVerifier",
+  "clientInformation",
+  "tokens",
+]);
 
 const CREDENTIAL_COLUMNS: Record<keyof McpCredentials, string> = {
   oauthState: "oauth_state",
@@ -362,7 +376,9 @@ export async function updateCredentials(
   for (const key of Object.keys(patch) as (keyof McpCredentials)[]) {
     const value = patch[key];
     if (value === undefined) continue;
-    params.push(value !== null && typeof value === "object" ? JSON.stringify(value) : value);
+    const serialised =
+      value !== null && typeof value === "object" ? JSON.stringify(value) : value;
+    params.push(SECRET_COLUMNS.has(key) ? encryptOptional(serialised) : serialised);
     assignments.push(`${CREDENTIAL_COLUMNS[key]} = $${params.length}`);
   }
   if (assignments.length === 0) return;

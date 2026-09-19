@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowUpRight, CircleAlert, CircleCheck } from "lucide-react"
 import { auth } from "@/auth";
 import { getAgent } from "@/lib/agents";
 import { listConnections } from "@/lib/mcp/connections";
+import { missingScopes } from "@/lib/slack-events-catalog";
 import { listTriggers } from "@/lib/triggers";
 import { AccessSection } from "@/components/access/access-section";
 import { InstallSlackPanel } from "@/components/access/install-slack-panel";
@@ -47,6 +48,10 @@ export default async function AgentDetailPage({
     listTriggers(agent.id),
   ]);
   const installed = query.installed === "1";
+  const slackTrigger = triggers.find((trigger) => trigger.kind === "slack");
+  const missing = agent.slackInstalledAt
+    ? missingScopes(slackTrigger?.events ?? [], agent.slackBotScopes)
+    : [];
   const code = typeof query.error === "string" ? query.error : undefined;
   const error = code ? ERRORS[code] : undefined;
   const cancelled = code ? CANCELLATIONS[code] : undefined;
@@ -128,7 +133,7 @@ export default async function AgentDetailPage({
 
       <AccessSection agent={agent} connections={connections} />
 
-      <InstallSlackPanel agent={agent} />
+      <InstallSlackPanel agent={agent} missingScopes={missing} />
     </div>
   );
 }

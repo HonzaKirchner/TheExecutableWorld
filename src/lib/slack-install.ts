@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 
 import { baseUrl } from "@/lib/base-url";
 import { slackPost } from "@/lib/slack";
-import { BOT_SCOPES, SLACK_INSTALL_REDIRECT_PATH } from "@/lib/slack-apps";
+import { SLACK_INSTALL_REDIRECT_PATH } from "@/lib/slack-apps";
 
 /**
  * The URL that installs an agent's Slack app. `team` pre-selects the agent's
@@ -13,10 +13,12 @@ export function buildInstallUrl(input: {
   clientId: string;
   workspaceId: string;
   state: string;
+  /** Must match the manifest's, which follow from the agent's events. */
+  scopes: readonly string[];
 }) {
   const url = new URL("https://slack.com/oauth/v2/authorize");
   url.searchParams.set("client_id", input.clientId);
-  url.searchParams.set("scope", BOT_SCOPES.join(","));
+  url.searchParams.set("scope", input.scopes.join(","));
   url.searchParams.set("redirect_uri", installRedirectUri());
   url.searchParams.set("state", input.state);
   url.searchParams.set("team", input.workspaceId);

@@ -1,6 +1,7 @@
 import { DESCRIPTION_MAX } from "@/lib/agent-limits";
 import { baseUrl } from "@/lib/base-url";
 import { getConfigAccessToken } from "@/lib/slack-config-token";
+import { botScopesFor, normalizeSlackEvents } from "@/lib/slack-events-catalog";
 import { slackPost } from "@/lib/slack";
 
 export type SlackAppCredentials = {
@@ -12,40 +13,23 @@ export type SlackAppCredentials = {
 };
 
 /**
- * What the agent needs to be a usable coworker: hear mentions, read and write
- * DMs, and look people up. The manifest declares them and the install flow
- * asks for the same list, so the two can't drift apart.
- */
-export const BOT_SCOPES = [
-  "app_mentions:read",
-  "channels:history",
-  "chat:write",
-  "im:history",
-  "im:read",
-  "im:write",
-  "users:read",
-];
-
-/**
  * Where Slack sends people after they install an agent. Slack only accepts a
  * redirect_uri that is listed in the manifest, so the install flow imports
  * this rather than spelling the path out a second time.
  */
 export const SLACK_INSTALL_REDIRECT_PATH = "/api/slack/install/callback";
 
-/**
- * The events Slack pushes to an agent's webhook. Both are covered by the
- * scopes above (`app_mentions:read`, `im:history`).
- */
-export const BOT_EVENTS = ["app_mention", "message.im"];
-
-export async function createSlackApp(input: {
+export type ManifestInput = {
   handle: string;
   /** One line about the coworker; becomes the app's description. */
   description: string | null;
   /** Where Slack should deliver events — must be reachable from the internet. */
   eventsUrl: string;
-}): Promise<SlackAppCredentials> {
+  /** Event ids from the catalog; the bot scopes follow from them. */
+  events: readonly string[];
+};
+
+export async function createSlackApp(input: ManifestInput): Promise<SlackAppCredentials> {
   const token = await getConfigAccessToken();
 
   const response = await slackPost<{
@@ -78,15 +62,21 @@ export async function deleteSlackApp(appId: string) {
   await slackPost("apps.manifest.delete", { token, form: { app_id: appId } });
 }
 
-export function buildManifest({
-  handle,
-  description,
-  eventsUrl,
-}: {
-  handle: string;
-  description: string | null;
-  eventsUrl: string;
-}) {
+/**
+ * Replaces the app's manifest — used when the events change. Slack applies
+ * new scopes to the manifest at once, but an installed app only gets them
+ * when it is installed again.
+ */
+export async function updateSlackApp(appId: string, input: ManifestInput) {
+  const token = await getConfigAccessToken();
+  await slackPost("apps.manifest.update", {
+    token,
+    form: { app_id: appId, manifest: JSON.stringify(buildManifest(input)) },
+  });
+}
+
+export function buildManifest({ handle, description, eventsUrl, events }: ManifestInput) {
+  const bot_events = normalizeSlackEvents(events);
   return {
     display_information: {
       // The handle is the agent's one name — in Slack's app list as well.
@@ -107,7 +97,7 @@ export function buildManifest({
       },
     },
     oauth_config: {
-      scopes: { bot: BOT_SCOPES },
+      scopes: { bot: botScopesFor(bot_events) },
       redirect_urls: [`${baseUrl()}${SLACK_INSTALL_REDIRECT_PATH}`],
     },
     settings: {
@@ -117,7 +107,7 @@ export function buildManifest({
       // the endpoint has to be deployed before agents can be.
       event_subscriptions: {
         request_url: eventsUrl,
-        bot_events: BOT_EVENTS,
+        bot_events,
       },
     },
   };

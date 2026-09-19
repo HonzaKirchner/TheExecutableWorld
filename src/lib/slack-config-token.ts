@@ -1,3 +1,4 @@
+import { decryptSecret, encryptSecret, isEncrypted } from "@/lib/crypto";
 import { db, ensureSchema } from "@/lib/db";
 import { SlackApiError, slackPost } from "@/lib/slack";
 
@@ -39,7 +40,10 @@ export async function getConfigAccessToken(): Promise<string> {
     limit 1
   `) as TokenRow[];
 
-  const current = rows[0];
+  // The pair predates encryption if it isn't marked as encrypted. Read it as
+  // it is, and write it back encrypted straight away rather than waiting for
+  // the next rotation.
+  const current = rows[0] ? await readPair(rows[0]) : undefined;
   if (current && !isExpiring(current.expires_at)) {
     return current.access_token;
   }
@@ -68,17 +72,34 @@ export async function getConfigAccessToken(): Promise<string> {
     }
   }
 
+  await storePair(rotated.token, rotated.refreshToken, rotated.expiresAt);
+
+  return rotated.token;
+}
+
+async function storePair(accessToken: string, refreshToken: string, expiresAt: string) {
+  const sql = db();
   await sql`
     insert into slack_config_tokens (id, access_token, refresh_token, expires_at, updated_at)
-    values (${ROW_ID}, ${rotated.token}, ${rotated.refreshToken}, ${rotated.expiresAt}, now())
+    values (${ROW_ID}, ${encryptSecret(accessToken)}, ${encryptSecret(refreshToken)}, ${expiresAt}, now())
     on conflict (id) do update
       set access_token  = excluded.access_token,
           refresh_token = excluded.refresh_token,
           expires_at    = excluded.expires_at,
           updated_at    = now()
   `;
+}
 
-  return rotated.token;
+async function readPair(row: TokenRow): Promise<TokenRow> {
+  if (isEncrypted(row.access_token) && isEncrypted(row.refresh_token)) {
+    return {
+      access_token: decryptSecret(row.access_token),
+      refresh_token: decryptSecret(row.refresh_token),
+      expires_at: row.expires_at,
+    };
+  }
+  await storePair(row.access_token, row.refresh_token, row.expires_at);
+  return row;
 }
 
 async function rotate(refreshToken: string) {

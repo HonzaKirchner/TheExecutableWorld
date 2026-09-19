@@ -31,12 +31,15 @@ export function InstallSlackButton({
       <Button
         type="submit"
         size={accent ? "lg" : "default"}
-        variant={reinstall ? "outline" : "default"}
+        variant={reinstall && !accent ? "outline" : "default"}
         disabled={pending}
         className={
-          accent
-            ? "gap-2 bg-violet-600 text-white shadow-sm hover:bg-violet-700 dark:bg-violet-500 dark:hover:bg-violet-400"
-            : "gap-2"
+          accent && reinstall
+            ? // Reinstalling for new permissions sits on the amber panel.
+              "gap-2 bg-amber-600 text-white shadow-sm hover:bg-amber-700 dark:bg-amber-500 dark:hover:bg-amber-400"
+            : accent
+              ? "gap-2 bg-violet-600 text-white shadow-sm hover:bg-violet-700 dark:bg-violet-500 dark:hover:bg-violet-400"
+              : "gap-2"
         }
       >
         {pending ? <Loader2 className="size-4 animate-spin" /> : null}

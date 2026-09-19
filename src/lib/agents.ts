@@ -1,3 +1,4 @@
+import { decryptOptional, decryptSecret, encryptSecret } from "@/lib/crypto";
 import { db, ensureSchema } from "@/lib/db";
 import type { SlackAppCredentials } from "@/lib/slack-apps";
 
@@ -14,6 +15,8 @@ export type Agent = {
   slackAppId: string | null;
   slackOauthAuthorizeUrl: string | null;
   slackInstalledAt: string | null;
+  /** The bot scopes the last install granted; null until installed. */
+  slackBotScopes: string[] | null;
 };
 
 type AgentRow = {
@@ -27,6 +30,7 @@ type AgentRow = {
   slack_app_id: string | null;
   slack_oauth_authorize_url: string | null;
   slack_installed_at: string | null;
+  slack_bot_scopes: string[] | null;
 };
 
 /**
@@ -35,7 +39,7 @@ type AgentRow = {
  * return value should be able to carry them to the client by accident.
  */
 const AGENT_COLUMNS =
-  "id, workspace_id, handle, description, instructions, model, created_at, slack_app_id, slack_oauth_authorize_url, slack_installed_at";
+  "id, workspace_id, handle, description, instructions, model, created_at, slack_app_id, slack_oauth_authorize_url, slack_installed_at, slack_bot_scopes";
 
 function toAgent(row: AgentRow): Agent {
   return {
@@ -49,6 +53,7 @@ function toAgent(row: AgentRow): Agent {
     slackAppId: row.slack_app_id,
     slackOauthAuthorizeUrl: row.slack_oauth_authorize_url,
     slackInstalledAt: row.slack_installed_at,
+    slackBotScopes: row.slack_bot_scopes,
   };
 }
 
@@ -162,8 +167,9 @@ export async function createAgent(input: {
       input.model,
       input.slackApp?.appId ?? null,
       input.slackApp?.clientId ?? null,
-      input.slackApp?.clientSecret ?? null,
-      input.slackApp?.signingSecret ?? null,
+      // Secrets never touch the database in the clear.
+      input.slackApp ? encryptSecret(input.slackApp.clientSecret) : null,
+      input.slackApp ? encryptSecret(input.slackApp.signingSecret) : null,
       input.slackApp?.oauthAuthorizeUrl ?? null,
     ],
   )) as AgentRow[];
@@ -217,7 +223,10 @@ export async function getAgentSlackCredentials(
 
   const row = rows[0];
   if (!row?.slack_client_id || !row.slack_client_secret) return null;
-  return { clientId: row.slack_client_id, clientSecret: row.slack_client_secret };
+  return {
+    clientId: row.slack_client_id,
+    clientSecret: decryptSecret(row.slack_client_secret),
+  };
 }
 
 /** Remembers the `state` of an install that has just been sent off to Slack. */
@@ -252,19 +261,33 @@ export async function getAgentByInstallState(state: string): Promise<Agent | nul
 
 export async function markSlackInstalled(
   agentId: string,
-  input: { botToken: string; botUserId: string },
+  input: { botToken: string; botUserId: string; scopes: string[] },
 ) {
   await ensureSchema();
   const sql = db();
   await sql`
     update agents
-    set slack_bot_token     = ${input.botToken},
+    set slack_bot_token     = ${encryptSecret(input.botToken)},
         slack_bot_user_id   = ${input.botUserId},
+        slack_bot_scopes    = ${input.scopes},
         slack_installed_at  = now(),
         slack_install_state = null,
         updated_at          = now()
     where id = ${agentId}
   `;
+}
+
+/**
+ * The bot token, for talking to Slack as the agent. Server-only, like the
+ * client credentials above.
+ */
+export async function getAgentBotToken(agentId: string): Promise<string | null> {
+  await ensureSchema();
+  const sql = db();
+  const rows = (await sql`
+    select slack_bot_token from agents where id = ${agentId} limit 1
+  `) as { slack_bot_token: string | null }[];
+  return decryptOptional(rows[0]?.slack_bot_token);
 }
 
 const UUID_RE =

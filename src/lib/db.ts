@@ -135,6 +135,13 @@ async function createSchema() {
     alter table agents drop column if exists name
   `;
 
+  // What the install actually granted. Compared with what the agent's
+  // events now require, to tell when a reinstall is due.
+  await sql`
+    alter table agents
+      add column if not exists slack_bot_scopes text[]
+  `;
+
   // One row per (agent, MCP server) the agent has been pointed at. Everything
   // the OAuth client needs to come back later lives here: the registered
   // client, the token pair, the PKCE verifier and `state` of an authorization
@@ -148,8 +155,8 @@ async function createSchema() {
       status              text not null default 'pending',
       oauth_state         text,
       code_verifier       text,
-      client_information  jsonb,
-      tokens              jsonb,
+      client_information  text,
+      tokens              text,
       discovery           jsonb,
       tools_synced_at     timestamptz,
       created_at          timestamptz not null default now(),
@@ -162,6 +169,25 @@ async function createSchema() {
     create index if not exists mcp_connections_oauth_state_idx
       on mcp_connections (oauth_state)
       where oauth_state is not null
+  `;
+
+  // The registered client, the token pair and the PKCE verifier are stored
+  // encrypted (see src/lib/crypto.ts), which makes them opaque text rather
+  // than jsonb. `discovery` is public metadata and stays queryable. Rows
+  // written before encryption can't be read any more; they go back to
+  // `pending`, which makes the person authorize again.
+  await sql`
+    alter table mcp_connections
+      alter column client_information type text using client_information::text,
+      alter column tokens type text using tokens::text
+  `;
+  await sql`
+    update mcp_connections
+    set client_information = null, tokens = null, code_verifier = null,
+        status = 'pending', updated_at = now()
+    where (client_information is not null and client_information not like 'enc:v1:%')
+       or (tokens is not null and tokens not like 'enc:v1:%')
+       or (code_verifier is not null and code_verifier not like 'enc:v1:%')
   `;
 
   // The tools a connection last reported, plus what the person decided about
@@ -189,6 +215,46 @@ async function createSchema() {
       kind        text not null,
       created_at  timestamptz not null default now(),
       unique (agent_id, kind)
+    )
+  `;
+
+  // What the trigger listens for lives in `config` (`{ events: [...] }` for
+  // both kinds). The rest is Stripe's: which connected account the trigger
+  // belongs to, the OAuth `state` of a connection in flight, and the last
+  // event that arrived — the only sign, short of logs, that the webhook works.
+  await sql`
+    alter table triggers
+      add column if not exists config           jsonb not null default '{}'::jsonb,
+      add column if not exists status           text not null default 'active',
+      add column if not exists account_id       text,
+      add column if not exists oauth_state      text,
+      add column if not exists last_event_at    timestamptz,
+      add column if not exists last_event_type  text
+  `;
+  await sql`
+    create index if not exists triggers_account_idx
+      on triggers (kind, account_id)
+      where account_id is not null
+  `;
+  await sql`
+    create index if not exists triggers_oauth_state_idx
+      on triggers (oauth_state)
+      where oauth_state is not null
+  `;
+
+  // The platform's one Connect webhook endpoint at Stripe, created by the app
+  // the first time a Stripe trigger is saved. Stripe only hands out the
+  // signing secret when the endpoint is created, hence the row.
+  await sql`
+    create table if not exists stripe_webhook_endpoint (
+      id              text primary key,
+      endpoint_id     text not null,
+      url             text not null,
+      secret          text not null,
+      enabled_events  text[] not null,
+      livemode        boolean not null default false,
+      created_at      timestamptz not null default now(),
+      updated_at      timestamptz not null default now()
     )
   `;
 

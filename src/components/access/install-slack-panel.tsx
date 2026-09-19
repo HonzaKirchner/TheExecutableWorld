@@ -1,4 +1,4 @@
-import { CircleCheck, Hash } from "lucide-react";
+import { CircleAlert, CircleCheck, Hash } from "lucide-react";
 
 import type { Agent } from "@/lib/agents";
 import { InstallSlackButton } from "@/components/access/install-slack-button";
@@ -8,7 +8,34 @@ import { InstallSlackButton } from "@/components/access/install-slack-button";
  * trigger fires. Tinted so it reads as the call to action on the page without
  * shouting.
  */
-export function InstallSlackPanel({ agent }: { agent: Agent }) {
+export function InstallSlackPanel({
+  agent,
+  missingScopes = [],
+}: {
+  agent: Agent;
+  /** Bot scopes the agent's events now need but the install didn't grant. */
+  missingScopes?: string[];
+}) {
+  if (agent.slackInstalledAt && missingScopes.length > 0) {
+    return (
+      <section className="mt-12 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-amber-200/70 bg-gradient-to-br from-amber-50 to-orange-50/60 px-6 py-5 dark:border-amber-900/50 dark:from-amber-950/40 dark:to-orange-950/20">
+        <div className="flex items-center gap-4">
+          <span className="flex size-10 items-center justify-center rounded-full bg-amber-600/10 text-amber-700 dark:text-amber-400">
+            <CircleAlert className="size-5" />
+          </span>
+          <div>
+            <h2 className="font-medium">@{agent.handle} needs new permissions</h2>
+            <p className="mt-0.5 max-w-lg text-sm text-muted-foreground">
+              The events it listens for need {formatList(missingScopes)}. Reinstall so Slack
+              asks for them.
+            </p>
+          </div>
+        </div>
+        <InstallSlackButton agentId={agent.id} reinstall accent />
+      </section>
+    );
+  }
+
   if (agent.slackInstalledAt) {
     return (
       <section className="mt-12 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-emerald-200/70 bg-gradient-to-br from-emerald-50 to-teal-50/60 px-6 py-5 dark:border-emerald-900/50 dark:from-emerald-950/40 dark:to-teal-950/20">
@@ -48,6 +75,12 @@ export function InstallSlackPanel({ agent }: { agent: Agent }) {
       <InstallSlackButton agentId={agent.id} accent />
     </section>
   );
+}
+
+function formatList(items: string[]) {
+  const codes = items.map((item) => `\u2018${item}\u2019`);
+  if (codes.length <= 1) return codes.join("");
+  return `${codes.slice(0, -1).join(", ")} and ${codes[codes.length - 1]}`;
 }
 
 function formatDate(value: string) {

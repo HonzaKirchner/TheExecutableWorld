@@ -15,6 +15,9 @@ Next.js (App Router) + Tailwind v4 + shadcn/ui, with Slack sign-in via Auth.js. 
 | `/api/mcp/callback`                  | Where MCP authorization servers send people back to            |
 | `/api/slack/install/callback`        | Where Slack sends people back to after installing an agent     |
 | `/api/slack/events/[triggerId]`      | Where Slack delivers an agent's events (mentions, DMs)         |
+| `/app/[agentId]/triggers/[kind]`     | A trigger's detail: connect (Stripe), choose events            |
+| `/api/stripe/connect/callback`       | Where Stripe Connect sends people back to                      |
+| `/api/stripe/events`                 | The platform's Connect webhook — events from every connected Stripe account |
 
 Everything under `/app` is gated by [src/proxy.ts](src/proxy.ts); signed-out visitors are sent to `/` with a `callbackUrl`, and signed-in visitors hitting `/` go straight to `/app`.
 
@@ -33,6 +36,10 @@ Everything under `/app` is gated by [src/proxy.ts](src/proxy.ts); signed-out vis
    | `APP_BASE_URL`         | Origin for OAuth redirect URLs (see below)      | optional |
    | `PUBLIC_BASE_URL`      | Internet-reachable origin for Slack event delivery; defaults to the Vercel production URL | locally, to create agents |
    | `DB_CONNECTION_STRING` | Neon → connection string                        | yes      |
+   | `ENCRYPTION_KEY`       | `openssl rand -hex 32` — encrypts every secret stored in the database | yes |
+   | `STRIPE_SECRET_KEY`    | The Stripe App developer account's secret key (same mode as the install link) | for Stripe triggers |
+   | `STRIPE_INSTALL_LINK`  | An install link copied from the Stripe App's External test tab (test mode), used verbatim | for Stripe triggers |
+   | `STRIPE_CLIENT_ID`     | Only as a fallback for a published app without `STRIPE_INSTALL_LINK` | optional |
 
    Auth.js would normally look for `AUTH_SLACK_ID` / `AUTH_SLACK_SECRET`. [src/auth.ts](src/auth.ts)
    passes `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET` to the provider explicitly so the
@@ -135,8 +142,21 @@ Six tables, created by [src/lib/db.ts](src/lib/db.ts):
 | `agents`              | `uuid`                    | `workspace_id`, `handle`, `description`, `instructions`, `model`, plus the Slack app it owns and — once installed — its bot token |
 | `mcp_connections`     | `uuid`, unique per (agent, server) | An agent's link to one MCP server: OAuth client, tokens, in-flight `state`/verifier, cached discovery |
 | `mcp_tools`           | (connection, tool name)   | The server's tools as last listed, with `allowed` and `requires_approval` |
-| `triggers`            | `uuid`, unique per (agent, kind) | What makes an agent act; the id is the webhook path        |
+| `triggers`            | `uuid`, unique per (agent, kind) | What makes an agent act: `config.events`, `status`, and for Stripe the connected `account_id` and the last event seen |
+| `stripe_webhook_endpoint` | `'default'`           | The platform's one Connect webhook endpoint at Stripe, with its signing secret |
 | `slack_config_tokens` | `'default'`               | The current app configuration token pair          |
+
+### Secrets are encrypted
+
+Everything secret that lands in the database — the Slack client and signing secrets of
+generated apps and their bot tokens, the MCP OAuth client/tokens/PKCE verifier, the Stripe
+webhook signing secret, the Slack app configuration token pair — goes through
+[src/lib/crypto.ts](src/lib/crypto.ts): AES-256-GCM under `ENCRYPTION_KEY`, stored as
+`enc:v1:<iv>.<ciphertext>.<tag>`. Reads refuse values without that prefix, so a plaintext
+column can't be mistaken for an encrypted one. Losing the key means losing every stored
+secret; agents would have to be recreated and servers reconnected. The configuration token
+row is the one exception to strictness: a pair from before encryption is read once and
+written back encrypted.
 
 Agent handles are unique per workspace and case-insensitive (`agents_workspace_handle_idx`),
 so two workspaces can both have an `@researcher`.
@@ -211,17 +231,25 @@ a fallback.
 The pair belongs to the workspace it was generated in, which is also the workspace new
 apps are created in — so there's one row, not one per signed-in workspace.
 
-> The Slack client and signing secrets of generated apps, their bot tokens, and the
-> OAuth tokens for MCP servers are all stored in plain text (`agents`,
-> `mcp_connections`). Encrypting them is worth doing before this holds anyone else's
-> workspaces.
-
 ## Triggers
 
-The **Triggers** section lists what makes an agent act. One kind works so far, **Slack**,
-and every agent gets it automatically; **Stripe** is listed faded as a placeholder. A trigger is a webhook: its row id is the last
-path segment of `/api/slack/events/[triggerId]`, and that URL goes into the Slack app's
-manifest as the Events API `request_url`, subscribed to `app_mention` and `message.im`.
+The **Triggers** section lists what makes an agent act: **Slack**, which every agent gets
+automatically, and **Stripe**, which the person connects. Opening a trigger shows its
+webhook, the last event it received, and lets the person choose the events it listens
+for; the choice is stored in `triggers.config.events`.
+
+### Slack
+
+A Slack trigger is the agent's own app's Events API subscription: the trigger's row id is
+the last path segment of `/api/slack/events/[triggerId]`, and that URL goes into the app's
+manifest as `request_url`. The events on offer, and the bot scope each one needs, are in
+[src/lib/slack-events-catalog.ts](src/lib/slack-events-catalog.ts); `app_mention` is
+always on and new agents also get `message.im`. Saving a different set runs
+`apps.manifest.update` with the new `bot_events` and the scopes derived from them, then
+stores the choice. Slack applies new scopes to an *installed* app only when it is
+installed again, so the install records the scopes it granted (`agents.slack_bot_scopes`)
+and the agent's page turns the install panel amber with a **Reinstall** button while the
+events need more than that.
 
 The id has to be known before the app is created (the manifest carries the URL), so the
 action generates it up front and inserts the trigger right after the agent.
@@ -243,9 +271,76 @@ The endpoint ([route.ts](src/app/api/slack/events/[triggerId]/route.ts)):
    and replying again would double-post;
 5. for a person's mention or DM, replies in the thread with the agent's bot token.
 
-Nothing more yet — the reply is a fixed line. Agents created before triggers existed have
-a trigger row (backfilled by the schema) but their Slack apps have no event subscription;
-recreate them.
+Nothing more yet — the reply is a fixed line, and other subscribed events are only noted
+on the trigger (`last_event_at`, `last_event_type`).
+
+### Stripe
+
+Stripe accounts connect by **installing a Stripe App** that this deployment owns — one with
+`stripe_api_access_type: "oauth"` ([docs](https://docs.stripe.com/stripe-apps/api-authentication/oauth)).
+Two facts from Stripe's docs shape the design:
+
+- The install link on `marketplace.stripe.com` comes back with an authorization code; the
+  exchange at `/v1/oauth/token` returns the installing account's id (`stripe_user_id`) and
+  tokens. The tokens aren't needed — the developer account's key with a `Stripe-Account`
+  header acts for an account that installed the app — so nothing per-account is stored
+  but the id.
+- Events from every account that installed the app are delivered to **one webhook
+  endpoint on the developer account** that listens to *connected accounts*
+  (`connect=true`), each event carrying the `account` it came from. Stripe only delivers
+  events the app holds permissions for: `event_read` plus one per object (`charge_read`
+  covers refunds and charges, `dispute_read`, `payment_intent_read`, `subscription_read`,
+  `invoice_read`, `customer_read`, `checkout_session_read`, `payout_read`, …).
+
+Setting up the app (once, with the Stripe CLI):
+
+1. In `stripe-app.json`: `"stripe_api_access_type": "oauth"`, `"distribution_type": "public"`,
+   and `"allowed_redirect_uris"` containing `<APP_BASE_URL>/api/stripe/connect/callback`
+   (locally `https://localhost:3003/api/stripe/connect/callback`; add the production one too).
+2. Grant permissions: `stripe apps grant permission event_read "…"` and one per event
+   object the agents may listen to. The trigger page lists what a choice needs.
+3. `stripe apps upload` **to the main account**, not a sandbox — only there does the app
+   get install links. On the app's page, the **External test** tab shows the install links
+   per mode; copy the test-mode one whole into `STRIPE_INSTALL_LINK`. While an app is in
+   external testing its links carry a channel (`chnlink_…`) that a link built from the
+   `client_id` alone lacks, and Stripe rejects the bare form as "invalid OAuth link", so
+   the app uses the link as given and only sets `redirect_uri` and `state` on it.
+   `STRIPE_SECRET_KEY` is the developer account's key in the same mode (a managed
+   sandbox's key for a sandbox link). The public links in **Settings** only work after
+   app review; for a published app `STRIPE_CLIENT_ID` alone is enough.
+
+The **Signing secret** shown on the app's page (`absec_…`) is for verifying requests a
+Stripe App UI extension sends to a backend; this app has no UI extension, so it isn't used.
+Webhook signatures use the endpoint's own `whsec_…` secret, which Stripe returns when the
+app creates the endpoint (below).
+
+The flow, in [triggers/actions.ts](src/app/app/[agentId]/triggers/actions.ts):
+
+1. **Connect Stripe** creates a `pending` trigger with an OAuth `state` and redirects to
+   the install link with `redirect_uri` and `state` set.
+2. `/api/stripe/connect/callback` resolves the `state`, checks the session's workspace,
+   exchanges the code for the account id, and marks the trigger active.
+3. The person picks events — a curated catalog in
+   [src/lib/stripe-events.ts](src/lib/stripe-events.ts) plus any event type typed in —
+   and saving calls `syncStripeEndpoint()` ([src/lib/stripe-webhook.ts](src/lib/stripe-webhook.ts)):
+   the first time it creates the endpoint via `POST /v1/webhook_endpoints` with
+   `connect=true`, `url=<PUBLIC_BASE_URL>/api/stripe/events` and the union of every
+   trigger's events (plus `account.application.deauthorized`), and stores the signing
+   secret Stripe returns only then; after that it updates `enabled_events` when the union
+   changes.
+4. `/api/stripe/events` verifies `Stripe-Signature` (HMAC-SHA256 over `t.body`, five-minute
+   window), finds the active triggers for `event.account` whose events include
+   `event.type`, and records the event on them. `account.application.deauthorized` (sent
+   when the account uninstalls the app) marks its triggers `disconnected`. It answers 200
+   in every case Stripe shouldn't retry.
+5. **Disconnect** deletes the trigger and, if no other agent listens to the account, tries
+   `/oauth/deauthorize` — documented for Connect, so treated as best effort; uninstalling
+   from the account's Dashboard is the sure way.
+
+As with Slack, the events URL has to be reachable from the internet, so it uses
+`PUBLIC_BASE_URL`; Stripe events for agents created locally arrive in production, which
+shares the database. Test-mode installs send test events only; a sandbox install sends
+events only to an endpoint in that sandbox.
 
 ## Giving an agent access
 

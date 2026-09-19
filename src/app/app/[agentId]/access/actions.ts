@@ -3,13 +3,8 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
-import { auth } from "@/auth";
-import {
-  getAgent,
-  getAgentSlackCredentials,
-  setSlackInstallState,
-  type Agent,
-} from "@/lib/agents";
+import { requireAgent } from "@/app/app/require-agent";
+import { getAgentSlackCredentials, setSlackInstallState, type Agent } from "@/lib/agents";
 import { getMcpServer } from "@/lib/mcp/catalog";
 import { connectAndListTools } from "@/lib/mcp/client";
 import {
@@ -21,25 +16,11 @@ import {
   upsertConnection,
 } from "@/lib/mcp/connections";
 import { suggestApproval } from "@/lib/mcp/tools";
+import { botScopesFor, DEFAULT_SLACK_EVENTS } from "@/lib/slack-events-catalog";
 import { buildInstallUrl, newInstallState } from "@/lib/slack-install";
+import { getTrigger } from "@/lib/triggers";
 
 export type AccessActionState = { error?: string };
-
-/**
- * Every action here is a POST endpoint reachable without the page, so each one
- * re-derives the agent from the session rather than trusting the form.
- */
-async function requireAgent(formData: FormData): Promise<Agent | { error: string }> {
-  const session = await auth();
-  const workspaceId = session?.slack?.teamId;
-  if (!workspaceId) {
-    return { error: "Your session has expired. Sign in again." };
-  }
-
-  const agentId = str(formData.get("agentId"));
-  const agent = await getAgent(workspaceId, agentId);
-  return agent ?? { error: "This agent no longer exists." };
-}
 
 /**
  * Points the agent at an MCP server. Ends in one of two places: on the
@@ -142,12 +123,18 @@ async function beginSlackInstall(agent: Agent) {
     throw new Error("This agent has no Slack app to install.");
   }
 
+  // The scopes asked for have to match the manifest's, which follow from the
+  // events the agent's Slack trigger listens for.
+  const trigger = await getTrigger(agent.id, "slack");
+  const scopes = botScopesFor(trigger?.events ?? DEFAULT_SLACK_EVENTS);
+
   const state = newInstallState();
   await setSlackInstallState(agent.id, state);
   return buildInstallUrl({
     clientId: credentials.clientId,
     workspaceId: agent.workspaceId,
     state,
+    scopes,
   });
 }
 

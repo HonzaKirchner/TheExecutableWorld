@@ -6,7 +6,7 @@ import {
   verifySlackSignature,
   type SlackEventEnvelope,
 } from "@/lib/slack-events";
-import { getSlackTriggerContext } from "@/lib/triggers";
+import { getSlackTriggerContext, recordTriggerEvent } from "@/lib/triggers";
 
 /**
  * Slack's Events API calls this for one agent — the trigger id in the path
@@ -66,6 +66,13 @@ export async function POST(
   }
 
   const event = envelope.event;
+  if (event?.type) {
+    await recordTriggerEvent(context.triggerId, event.type).catch(() => {});
+  }
+
+  // Only a person talking to the agent gets an answer. Other subscribed
+  // events (reactions, joins, channel chatter) are received and, for now,
+  // left at that.
   if (!event || !isHumanMessage(event) || !event.channel || !event.ts) {
     return new Response(null, { status: 200 });
   }

@@ -15,6 +15,7 @@ import { createAgent, deleteAgent, isHandleTaken } from "@/lib/agents";
 import { isModelId } from "@/lib/models";
 import { SlackApiError } from "@/lib/slack";
 import { createSlackApp, deleteSlackApp } from "@/lib/slack-apps";
+import { DEFAULT_SLACK_EVENTS } from "@/lib/slack-events-catalog";
 import { createTrigger, slackEventsUrl } from "@/lib/triggers";
 
 export type CreateAgentField =
@@ -99,6 +100,7 @@ export async function createAgentAction(
       handle,
       description: description || null,
       eventsUrl: slackEventsUrl(triggerId),
+      events: DEFAULT_SLACK_EVENTS,
     });
   } catch (error) {
     return { status: "error", message: slackAppFailureMessage(error), values };
@@ -115,7 +117,12 @@ export async function createAgentAction(
       slackApp,
     });
     try {
-      await createTrigger({ id: triggerId, agentId: agent.id, kind: "slack" });
+      await createTrigger({
+        id: triggerId,
+        agentId: agent.id,
+        kind: "slack",
+        events: DEFAULT_SLACK_EVENTS,
+      });
     } catch (error) {
       await deleteAgent(agent.id).catch(() => {});
       throw error;
