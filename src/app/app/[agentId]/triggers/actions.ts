@@ -85,9 +85,9 @@ export async function connectStripeAction(
 }
 
 /**
- * Records which Stripe events the trigger listens for and brings the
- * platform's webhook endpoint in line. Catalog picks and typed-in event types
- * arrive in different fields and are merged here.
+ * Records which Stripe events reach this agent. The shared endpoint takes
+ * everything; this list is the filter the events route applies. Catalog picks
+ * and typed-in event types arrive in different fields and are merged here.
  */
 export async function saveStripeEventsAction(
   _previous: TriggerActionState,
@@ -109,7 +109,7 @@ export async function saveStripeEventsAction(
   try {
     await syncStripeEndpoint();
   } catch (error) {
-    return { error: `Saved, but Stripe's webhook endpoint could not be updated: ${stripeFailure(error)}` };
+    return { error: `Saved, but Stripe's webhook endpoint could not be registered: ${stripeFailure(error)}` };
   }
 
   revalidatePath(`/app/${agent.id}`);
@@ -129,9 +129,6 @@ export async function disconnectStripeAction(
 
   await deauthorizeIfUnused(trigger.accountId, agent);
   await deleteTrigger(trigger.id);
-  // Best effort: the endpoint carrying a few extra events is harmless, and
-  // the next save fixes it.
-  await syncStripeEndpoint().catch(() => {});
 
   revalidatePath(`/app/${agent.id}`);
   redirect(`/app/${agent.id}`);

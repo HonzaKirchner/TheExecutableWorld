@@ -1,21 +1,26 @@
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
 import { db, ensureSchema } from "@/lib/db";
 import {
-  STRIPE_DEAUTHORIZED_EVENT,
   createConnectWebhookEndpoint,
-  stripeEventsUrl,
   updateWebhookEndpointEvents,
   type StripeWebhookEndpoint,
 } from "@/lib/stripe";
-import { allStripeEventTypes } from "@/lib/triggers";
 
 /**
  * The platform's one Connect webhook endpoint at Stripe (see src/lib/stripe.ts
- * for why there is one and not one per account). Created on demand and kept
- * subscribed to exactly the events some trigger wants, plus the
- * deauthorization notice.
+ * for why there is one and not one per account). Created on demand and
+ * subscribed to every event Stripe offers: the app is one installation
+ * shared by many agents, each picking the events it cares about, so the
+ * filtering happens here (src/app/api/stripe/events/route.ts), not at Stripe.
  */
 const ROW_ID = "default";
+
+/**
+ * Stripe's "all events" selector. It leaves out a few event types that have
+ * to be chosen explicitly; if an agent ever needs one of those, it gets added
+ * here alongside `*`.
+ */
+const ALL_EVENTS: readonly string[] = ["*"];
 
 type EndpointRow = {
   endpoint_id: string;
@@ -51,12 +56,12 @@ export async function getStripeEndpointSecret(): Promise<string | null> {
 }
 
 /**
- * Brings Stripe's endpoint in line with what triggers listen for. Called
- * after every change to a Stripe trigger's events. Creating happens once;
- * after that only `enabled_events` changes, and only when it has to.
+ * Makes sure the endpoint exists and is subscribed to everything. Called when
+ * an account connects and whenever a trigger's events are saved; after the
+ * first time it is a single read unless the selector above has changed.
  */
 export async function syncStripeEndpoint() {
-  const wanted = [...new Set([STRIPE_DEAUTHORIZED_EVENT, ...(await allStripeEventTypes())])].sort();
+  const wanted = [...ALL_EVENTS].sort();
   const current = await readRow();
 
   if (!current) {
@@ -66,7 +71,6 @@ export async function syncStripeEndpoint() {
   }
 
   const unchanged =
-    current.url === stripeEventsUrl() &&
     current.enabled_events.length === wanted.length &&
     current.enabled_events.every((event, i) => event === wanted[i]);
   if (unchanged) return;

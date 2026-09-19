@@ -233,19 +233,6 @@ export async function findStripeTriggers(accountId: string, eventType: string): 
   return rows.map(toTrigger);
 }
 
-/** Every Stripe event type any trigger listens for — what the endpoint must enable. */
-export async function allStripeEventTypes(): Promise<string[]> {
-  await ensureSchema();
-  const sql = db();
-  const rows = (await sql`
-    select distinct e as type
-    from triggers, jsonb_array_elements_text(config->'events') as e
-    where kind = 'stripe'
-    order by 1
-  `) as { type: string }[];
-  return rows.map((row) => row.type);
-}
-
 /** The only evidence, short of logs, that a webhook is being called. */
 export async function recordTriggerEvent(triggerId: string, eventType: string) {
   await ensureSchema();

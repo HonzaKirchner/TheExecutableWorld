@@ -35,7 +35,7 @@ const API = "https://api.stripe.com/v1";
 export const STRIPE_CONNECT_CALLBACK_PATH = "/api/stripe/connect/callback";
 export const STRIPE_EVENTS_PATH = "/api/stripe/events";
 
-/** Sent to the platform when an account disconnects; always subscribed. */
+/** Sent to the platform when an account uninstalls the app; covered by `*`. */
 export const STRIPE_DEAUTHORIZED_EVENT = "account.application.deauthorized";
 
 export function isStripeConfigured() {

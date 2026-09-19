@@ -9,7 +9,7 @@ import {
   type TriggerActionState,
 } from "@/app/app/[agentId]/triggers/actions";
 import { botScopesFor } from "@/lib/slack-events-catalog";
-import { isStripeEventType, permissionsFor } from "@/lib/stripe-events";
+import { isStripeEventType } from "@/lib/stripe-events";
 import type { TriggerKind } from "@/lib/triggers";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -65,11 +65,6 @@ export function TriggerEventsForm({
   const scopes = kind === "slack" ? botScopesFor(chosen) : [];
   const grantedSet = new Set(granted ?? []);
   const newScopes = granted ? scopes.filter((scope) => !grantedSet.has(scope)) : [];
-
-  const stripeNeeds =
-    kind === "stripe"
-      ? permissionsFor([...chosen, ...customTypes.map((type) => type.toLowerCase())])
-      : null;
 
   return (
     <form action={formAction} className="mt-8">
@@ -151,28 +146,6 @@ export function TriggerEventsForm({
         </div>
       ) : null}
 
-      {stripeNeeds ? (
-        <div className="mt-6 rounded-xl border bg-muted/30 px-4 py-3">
-          <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            Stripe App permissions these need
-          </p>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {stripeNeeds.permissions.map((permission) => (
-              <Badge key={permission} variant="outline" className="font-mono text-[10px]">
-                {permission}
-              </Badge>
-            ))}
-          </div>
-          <p className="mt-2 text-xs text-muted-foreground">
-            Stripe only delivers events the installed app may read, so the app&apos;s manifest
-            has to grant these (<code className="font-mono">stripe apps grant permission …</code>).
-            {stripeNeeds.unknown.length > 0
-              ? ` Look up the permission for ${stripeNeeds.unknown.join(", ")} in Stripe's permissions reference.`
-              : null}
-          </p>
-        </div>
-      ) : null}
-
       {kind === "slack" ? (
         <div className="mt-6 rounded-xl border bg-muted/30 px-4 py-3">
           <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
@@ -206,7 +179,7 @@ export function TriggerEventsForm({
         <p className="text-xs text-muted-foreground">
           {kind === "slack"
             ? "Saved to the app's manifest at Slack."
-            : "Saved, and the Stripe webhook is updated to match."}
+            : "Only these events reach the agent; everything else Stripe sends is dropped here."}
         </p>
         <div className="flex items-center gap-3">
           {state.error ? (

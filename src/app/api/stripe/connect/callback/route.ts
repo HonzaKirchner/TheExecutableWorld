@@ -3,6 +3,7 @@ import { revalidatePath } from "next/cache";
 
 import { auth } from "@/auth";
 import { exchangeStripeCode } from "@/lib/stripe";
+import { syncStripeEndpoint } from "@/lib/stripe-webhook";
 import { getTriggerByOAuthState, markStripeConnected } from "@/lib/triggers";
 
 /**
@@ -42,6 +43,11 @@ export async function GET(request: NextRequest) {
   }
 
   await markStripeConnected(trigger.id, account.accountId);
+  // The shared endpoint subscribes to everything, so it can exist before the
+  // person has picked events. Saving events retries if this fails.
+  await syncStripeEndpoint().catch((error) =>
+    console.error("Could not register the Stripe webhook endpoint", error),
+  );
   revalidatePath(`/app/${trigger.agentId}`);
   return redirectTo(request, back, { connected: "1" });
 }

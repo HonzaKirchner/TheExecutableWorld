@@ -288,17 +288,20 @@ Two facts from Stripe's docs shape the design:
 - Events from every account that installed the app are delivered to **one webhook
   endpoint on the developer account** that listens to *connected accounts*
   (`connect=true`), each event carrying the `account` it came from. Stripe only delivers
-  events the app holds permissions for: `event_read` plus one per object (`charge_read`
-  covers refunds and charges, `dispute_read`, `payment_intent_read`, `subscription_read`,
-  `invoice_read`, `customer_read`, `checkout_session_read`, `payout_read`, …).
+  events the app holds permissions for, so the app's manifest grants the read permission
+  for every object, and the endpoint subscribes to `*`. One installation then serves
+  every agent: each trigger keeps its own list of event types, and the events route
+  drops everything else. Changing what an agent listens to never touches Stripe.
 
 Setting up the app (once, with the Stripe CLI):
 
 1. In `stripe-app.json`: `"stripe_api_access_type": "oauth"`, `"distribution_type": "public"`,
    and `"allowed_redirect_uris"` containing `<APP_BASE_URL>/api/stripe/connect/callback`
    (locally `https://localhost:3003/api/stripe/connect/callback`; add the production one too).
-2. Grant permissions: `stripe apps grant permission event_read "…"` and one per event
-   object the agents may listen to. The trigger page lists what a choice needs.
+2. Grant `event_read` and the `*_read` permission of every object whose events agents
+   may want (the manifest in the sibling `TheExecutableWorldStripeApp` project does).
+   Adding permissions later means a new upload, pointing the External test at that
+   version, and reinstalling on each account so the new permissions are accepted.
 3. `stripe apps upload` **to the main account**, not a sandbox — only there does the app
    get install links. On the app's page, the **External test** tab shows the install links
    per mode; copy the test-mode one whole into `STRIPE_INSTALL_LINK`. While an app is in
@@ -320,17 +323,18 @@ The flow, in [triggers/actions.ts](src/app/app/[agentId]/triggers/actions.ts):
    the install link with `redirect_uri` and `state` set.
 2. `/api/stripe/connect/callback` resolves the `state`, checks the session's workspace,
    exchanges the code for the account id, and marks the trigger active.
-3. The person picks events — a curated catalog in
+3. The callback also runs `syncStripeEndpoint()`
+   ([src/lib/stripe-webhook.ts](src/lib/stripe-webhook.ts)), which the first time creates
+   the endpoint via `POST /v1/webhook_endpoints` with `connect=true`,
+   `url=<PUBLIC_BASE_URL>/api/stripe/events` and `enabled_events=["*"]`, and stores the
+   signing secret Stripe returns only then. Saving events runs it again in case that
+   failed. The person picks events — a curated catalog in
    [src/lib/stripe-events.ts](src/lib/stripe-events.ts) plus any event type typed in —
-   and saving calls `syncStripeEndpoint()` ([src/lib/stripe-webhook.ts](src/lib/stripe-webhook.ts)):
-   the first time it creates the endpoint via `POST /v1/webhook_endpoints` with
-   `connect=true`, `url=<PUBLIC_BASE_URL>/api/stripe/events` and the union of every
-   trigger's events (plus `account.application.deauthorized`), and stores the signing
-   secret Stripe returns only then; after that it updates `enabled_events` when the union
-   changes.
+   and the list is stored on the trigger.
 4. `/api/stripe/events` verifies `Stripe-Signature` (HMAC-SHA256 over `t.body`, five-minute
-   window), finds the active triggers for `event.account` whose events include
-   `event.type`, and records the event on them. `account.application.deauthorized` (sent
+   window), finds the active triggers for `event.account` whose lists include
+   `event.type`, and records the event on them; events no trigger asked for are
+   acknowledged and dropped. `account.application.deauthorized` (sent
    when the account uninstalls the app) marks its triggers `disconnected`. It answers 200
    in every case Stripe shouldn't retry.
 5. **Disconnect** deletes the trigger and, if no other agent listens to the account, tries

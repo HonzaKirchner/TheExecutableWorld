@@ -211,9 +211,7 @@ async function StripeDetail({
         <p className="mt-3 max-w-xl text-muted-foreground">
           The app manifest must list{" "}
           <code className="font-mono text-xs break-all">{stripeConnectRedirectUri()}</code> in{" "}
-          <code className="font-mono text-xs">allowed_redirect_uris</code>, and grant{" "}
-          <code className="font-mono text-xs">event_read</code> plus a permission per event
-          object.
+          <code className="font-mono text-xs">allowed_redirect_uris</code>.
         </p>
       </section>
     );
@@ -272,14 +270,15 @@ async function StripeDetail({
           <span className="mt-1 block text-xs text-muted-foreground">
             {endpoint
               ? `Registered at Stripe as ${endpoint.endpointId}${endpoint.livemode ? "" : " (test mode)"}.`
-              : "Registered at Stripe the first time events are saved."}
+              : "Registered at Stripe when an account connects."}
           </span>
         </Field>
       </dl>
 
       <h2 className="mt-10 text-lg font-semibold tracking-tight">Events</h2>
       <p className="mt-1 text-sm text-muted-foreground">
-        Stripe sends these for the connected account.
+        Stripe sends the connected account&apos;s events to one shared webhook; only the types
+        chosen here reach @{agent.handle}.
         {trigger.events.length > 0 ? (
           <>
             {" "}
