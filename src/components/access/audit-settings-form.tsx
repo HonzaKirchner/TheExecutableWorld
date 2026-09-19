@@ -57,7 +57,7 @@ export function AuditSettingsForm({
       <form action={formAction} className="mt-5 max-w-lg space-y-5 rounded-xl border bg-card p-5">
         <input type="hidden" name="agentId" value={agent.id} />
 
-        {directory.channels ? (
+        {directory.channels?.length ? (
           <ChannelPicker channels={directory.channels} initial={agent.auditChannelId} />
         ) : (
           <div className="space-y-1.5">
@@ -72,9 +72,12 @@ export function AuditSettingsForm({
             <p className="text-xs text-muted-foreground">
               The bot must already be in this channel. Find the ID in Slack under &ldquo;Copy
               channel ID&rdquo;.{" "}
-              {agent.slackInstalledAt
-                ? `To pick from a list instead, give @${agent.handle} the List channels tool and reinstall.`
-                : "Install the app to pick from a list."}
+              {directory.channels
+                ? // The list could be read but came back empty: the bot is in no channel yet.
+                  "Once the bot has been invited to a channel, you can pick from a list instead."
+                : agent.slackInstalledAt
+                  ? `To pick from a list instead, give @${agent.handle} the List channels tool and reinstall.`
+                  : "Install the app to pick from a list."}
             </p>
           </div>
         )}
