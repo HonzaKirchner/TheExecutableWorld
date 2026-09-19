@@ -5,35 +5,40 @@ import { useFormStatus } from "react-dom";
 import { ChevronRight, Loader2 } from "lucide-react";
 import { cn } from "cn";
 
-import {
-  installSlackAppAction,
-  type AccessActionState,
-} from "@/app/app/[agentId]/access/actions";
+type ActionState = { error?: string };
+type Action = (previous: ActionState, formData: FormData) => Promise<ActionState>;
 
 /**
- * The Slack trigger's card while the agent's app isn't installed. Rather than
- * open a page that can't do anything yet, the whole card is a submit button
- * that starts the install; Slack sends the person back to the trigger's page,
- * where choosing events is the next step. Mirrors ConnectServerCard.
+ * A trigger's card while it isn't connected yet. Rather than open a page
+ * whose only button would be "connect", the whole card is a submit button
+ * that starts the connection — installing the Slack app, sending the person
+ * to Stripe or Google, or asking Gmail to start watching. Each of those ends
+ * on the trigger's page, where choosing events is the next step. Mirrors
+ * ConnectServerCard under Access.
+ *
+ * `fields` are the hidden inputs the action reads beside `agentId`.
  */
-export function InstallSlackTriggerCard({
+export function ConnectTriggerCard({
+  action,
   agentId,
+  fields = {},
   className,
   children,
 }: {
+  action: Action;
   agentId: string;
+  fields?: Record<string, string>;
   className?: string;
   children: React.ReactNode;
 }) {
-  const [state, formAction, pending] = useActionState<AccessActionState, FormData>(
-    installSlackAppAction,
-    {},
-  );
+  const [state, formAction, pending] = useActionState<ActionState, FormData>(action, {});
 
   return (
     <form action={formAction} className="contents">
       <input type="hidden" name="agentId" value={agentId} />
-      <input type="hidden" name="returnTo" value="trigger" />
+      {Object.entries(fields).map(([name, value]) => (
+        <input key={name} type="hidden" name={name} value={value} />
+      ))}
       <button
         type="submit"
         disabled={pending}
@@ -54,19 +59,19 @@ export function InstallSlackTriggerCard({
   );
 }
 
-/** The card's footer line; inside the form, so it knows when the install is starting. */
-export function InstallSlackTriggerLabel() {
+/** The card's footer line; inside the form, so it knows when the connection is starting. */
+export function ConnectTriggerLabel({ label, pendingLabel }: { label: string; pendingLabel: string }) {
   const { pending } = useFormStatus();
   return (
     <span className="mt-3 flex items-center gap-0.5 text-xs text-muted-foreground transition-colors group-hover:text-foreground">
       {pending ? (
         <>
           <Loader2 className="mr-1 size-3.5 animate-spin" />
-          Opening Slack…
+          {pendingLabel}
         </>
       ) : (
         <>
-          Install to Slack
+          {label}
           <ChevronRight className="size-3.5" />
         </>
       )}

@@ -23,10 +23,18 @@ export type ManifestInput = {
   handle: string;
   /** One line about the coworker; becomes the app's description. */
   description: string | null;
-  /** Where Slack should deliver events — must be reachable from the internet. */
-  eventsUrl: string;
-  /** Event ids from the catalog; the bot scopes follow from them. */
-  events: readonly string[];
+  /**
+   * The agent's Slack trigger, if it has one: where Slack should deliver
+   * events — reachable from the internet — and which. Without it the app
+   * subscribes to nothing; it can still post, as its tools do.
+   */
+  subscription?: {
+    eventsUrl: string;
+    /** Event ids from the catalog; the bot scopes follow from them. */
+    events: readonly string[];
+  };
+  /** Names of the Slack tools the agent may call; their scopes are asked for too. */
+  tools: readonly string[];
 };
 
 /**
@@ -72,9 +80,9 @@ export async function deleteSlackApp(workspaceId: string, appId: string) {
 }
 
 /**
- * Replaces the app's manifest — used when the events change. Slack applies
- * new scopes to the manifest at once, but an installed app only gets them
- * when it is installed again.
+ * Replaces the app's manifest — used when the events or the allowed tools
+ * change. Slack applies new scopes to the manifest at once, but an installed
+ * app only gets them when it is installed again.
  */
 export async function updateSlackApp(
   workspaceId: string,
@@ -88,8 +96,8 @@ export async function updateSlackApp(
   });
 }
 
-export function buildManifest({ handle, description, eventsUrl, events }: ManifestInput) {
-  const bot_events = normalizeSlackEvents(events);
+export function buildManifest({ handle, description, subscription, tools }: ManifestInput) {
+  const bot_events = subscription ? normalizeSlackEvents(subscription.events) : [];
   return {
     display_information: {
       // The handle is the agent's one name — in Slack's app list as well.
@@ -110,18 +118,23 @@ export function buildManifest({ handle, description, eventsUrl, events }: Manife
       },
     },
     oauth_config: {
-      scopes: { bot: botScopesFor(bot_events) },
+      scopes: { bot: botScopesFor(bot_events, tools) },
       redirect_urls: [`${baseUrl()}${SLACK_INSTALL_REDIRECT_PATH}`],
     },
     settings: {
       org_deploy_enabled: false,
       socket_mode_enabled: false,
-      // Slack verifies the URL with a challenge when the app is created, so
-      // the endpoint has to be deployed before agents can be.
-      event_subscriptions: {
-        request_url: eventsUrl,
-        bot_events,
-      },
+      // Slack verifies the URL with a challenge when it lands in the
+      // manifest, so the endpoint has to be deployed before an agent can
+      // subscribe to events.
+      ...(subscription
+        ? {
+            event_subscriptions: {
+              request_url: subscription.eventsUrl,
+              bot_events,
+            },
+          }
+        : {}),
     },
   };
 }

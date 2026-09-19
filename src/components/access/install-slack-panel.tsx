@@ -5,16 +5,19 @@ import { InstallSlackButton } from "@/components/access/install-slack-button";
 
 /**
  * The step that makes an agent real: until its Slack app is installed, no
- * trigger fires. Tinted so it reads as the call to action on the page without
- * shouting.
+ * Slack event reaches it and it has no Slack tools. Tinted so it reads as
+ * the call to action on the page without shouting.
  */
 export function InstallSlackPanel({
   agent,
   missingScopes = [],
+  listening,
 }: {
   agent: Agent;
-  /** Bot scopes the agent's events now need but the install didn't grant. */
+  /** Bot scopes the agent's events and tools now need but the install didn't grant. */
   missingScopes?: string[];
+  /** Whether the agent has a Slack trigger, i.e. whether anyone can talk to it there. */
+  listening: boolean;
 }) {
   if (agent.slackInstalledAt && missingScopes.length > 0) {
     return (
@@ -26,8 +29,8 @@ export function InstallSlackPanel({
           <div>
             <h2 className="font-medium">@{agent.handle} needs new permissions</h2>
             <p className="mt-0.5 max-w-lg text-sm text-muted-foreground">
-              The events it listens for need {formatList(missingScopes)}. Reinstall so Slack
-              asks for them.
+              Its events and tools need {formatList(missingScopes)}. Reinstall so Slack asks
+              for them.
             </p>
           </div>
         </div>
@@ -46,8 +49,10 @@ export function InstallSlackPanel({
           <div>
             <h2 className="font-medium">@{agent.handle} is in Slack</h2>
             <p className="mt-0.5 text-sm text-muted-foreground">
-              Installed {formatDate(agent.slackInstalledAt)}. Mention them or send a DM to
-              try it out.
+              Installed {formatDate(agent.slackInstalledAt)}.{" "}
+              {listening
+                ? "Mention them or send a DM to try it out."
+                : "Choose Slack events under Triggers so people can talk to them."}
             </p>
           </div>
         </div>
@@ -67,8 +72,9 @@ export function InstallSlackPanel({
             Bring @{agent.handle} into Slack
           </h2>
           <p className="mt-1 max-w-md text-sm text-muted-foreground">
-            Nothing happens until the app is installed. Slack will ask you to approve its
-            permissions; after that, mentions and DMs reach them.
+            Slack will ask you to approve the app&apos;s permissions. Once it&apos;s in, the
+            events you choose under Triggers reach them, and they can use the Slack tools
+            you allow under Access.
           </p>
         </div>
       </div>

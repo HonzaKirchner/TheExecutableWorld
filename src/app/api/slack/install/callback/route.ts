@@ -8,6 +8,7 @@ import {
   getAgentSlackCredentials,
   markSlackInstalled,
 } from "@/lib/agents";
+import { refreshSlackConnectionToken } from "@/lib/slack-access";
 import { exchangeInstallCode, installReturnTo, revokeInstallation } from "@/lib/slack-install";
 
 /**
@@ -63,6 +64,10 @@ export async function GET(request: NextRequest) {
   }
 
   await markSlackInstalled(agent.id, installation);
+  // The agent's Slack tools, if it has any, speak with this token from now on.
+  await refreshSlackConnectionToken(agent).catch((error) =>
+    console.error(`Could not hand the new bot token to agent ${agent.id}'s Slack connection`, error),
+  );
   revalidatePath(agentPage);
   revalidatePath("/app");
   return redirectTo(back, { installed: "1" });

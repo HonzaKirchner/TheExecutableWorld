@@ -14,11 +14,13 @@ import { baseUrl, publicBaseUrl } from "@/lib/base-url";
  *   the id.
  * - Events from every account that installed the app arrive at ONE webhook
  *   endpoint on the developer account, created with `connect=true`. Each
- *   event names the account it came from, which is how it finds its trigger.
- *   The app creates this endpoint itself and keeps its `enabled_events` equal
- *   to the union of what triggers listen for. Stripe only delivers events
- *   the app's manifest holds permissions for (`event_read` plus one per
- *   object) — see src/lib/stripe-events.ts.
+ *   event names the account it came from, which is how it finds the
+ *   workspace(s) that connected it (src/lib/stripe-connections.ts) and, in
+ *   them, the agents whose triggers ask for its type. The app creates this
+ *   endpoint itself, subscribed to everything; the filtering is per trigger,
+ *   on our side. Stripe only delivers events the app's manifest holds
+ *   permissions for (`event_read` plus one per object) — see
+ *   src/lib/stripe-events.ts.
  *
  * Needs `STRIPE_SECRET_KEY` (the app developer account's key, or a managed
  * sandbox's) and `STRIPE_INSTALL_LINK`: an install link copied from the app's

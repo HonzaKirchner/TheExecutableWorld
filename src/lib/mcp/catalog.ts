@@ -5,10 +5,13 @@ import { baseUrl } from "@/lib/base-url";
 /**
  * The MCP servers an agent can be given access to.
  *
- * All of them speak Streamable HTTP and authorize with OAuth. Most let the
- * client register itself dynamically, which is what lets one deployment
- * connect to any of them without someone pre-registering it by hand. The ones
- * that don't (GitHub, Google) take a pre-registered client from the environment.
+ * All of them speak Streamable HTTP and, with one exception, authorize with
+ * OAuth. Most let the client register itself dynamically, which is what lets
+ * one deployment connect to any of them without someone pre-registering it
+ * by hand. The ones that don't (GitHub, Google) take a pre-registered client
+ * from the environment. The exception is Slack: this app's own server, which
+ * takes the bot token the agent's Slack app already holds (see
+ * src/lib/slack-access.ts), so there is no one to authorize with.
  *
  * `id` is what gets stored, so treat it as permanent. The URL is copied onto
  * the connection at connect time, so changing one here only affects new ones.
@@ -37,12 +40,36 @@ export type McpServerDefinition = {
    * servers that predate it and might balk at a parameter they don't know.
    */
   resourceIndicator?: boolean;
+  /**
+   * For a server that has no authorization flow — its bearer token comes
+   * from somewhere else: the message to fail with when the server refuses
+   * the token, instead of letting the OAuth client go looking for an
+   * authorization server that isn't there.
+   */
+  noAuthorization?: string;
 };
 
 /** The path of the Gmail MCP server this app hosts (src/lib/gmail/mcp-server.ts). */
 export const GMAIL_MCP_PATH = "/api/mcp/gmail";
 
+/** The path of the Slack MCP server this app hosts (src/lib/slack-mcp-server.ts). */
+export const SLACK_MCP_PATH = "/api/mcp/slack";
+
 export const MCP_SERVERS: readonly McpServerDefinition[] = [
+  {
+    id: "slack",
+    name: "Slack",
+    description:
+      "Post messages, read channels and threads, look up people — as the agent's own Slack app.",
+    // Served by this very app. Authorized by the agent's bot token, which
+    // its Slack install granted, rather than by an OAuth flow of its own.
+    get url() {
+      return `${baseUrl()}${SLACK_MCP_PATH}`;
+    },
+    resourceIndicator: false,
+    noAuthorization:
+      "Slack no longer honours the agent's bot token. Reinstall the app from the agent's page.",
+  },
   {
     id: "apify",
     name: "Apify",
@@ -132,6 +159,7 @@ export type ServerOAuthOptions = {
   preregistered?: OAuthClientInformationMixed;
   authorizationParams?: Record<string, string>;
   resourceIndicator?: boolean;
+  noAuthorization?: string;
 };
 
 export function serverOAuthOptions(serverId: string): ServerOAuthOptions {
@@ -140,6 +168,7 @@ export function serverOAuthOptions(serverId: string): ServerOAuthOptions {
     preregistered: preregisteredClient(serverId),
     authorizationParams: server?.authorizationParams,
     resourceIndicator: server?.resourceIndicator,
+    noAuthorization: server?.noAuthorization,
   };
 }
 

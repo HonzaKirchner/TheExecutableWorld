@@ -2,18 +2,20 @@ import { after, type NextRequest } from "next/server";
 
 import { handleStripeEvent } from "@/lib/agent/stripe";
 import { STRIPE_DEAUTHORIZED_EVENT, verifyStripeSignature, type StripeEvent } from "@/lib/stripe";
+import { markStripeAccountDisconnected } from "@/lib/stripe-connections";
 import { getStripeEndpointSecret } from "@/lib/stripe-webhook";
-import { findStripeTriggers, markStripeDisconnected, recordTriggerEvent } from "@/lib/triggers";
+import { findStripeTriggers, recordTriggerEvent } from "@/lib/triggers";
 
 /** As on the Slack webhook: the agents' runs happen inside this budget. */
 export const maxDuration = 300;
 
 /**
  * The platform's Connect webhook: every connected account's events land
- * here, each naming its account. Stripe wants a 2xx quickly and retries for
- * days otherwise, so the request does the minimum — check the signature,
- * find the triggers, note the event — and answers 200 even when there's
- * nothing to do. The agents run in `after`.
+ * here, each naming its account. The account belongs to a workspace, and
+ * the event goes to every agent in it whose trigger lists the type. Stripe
+ * wants a 2xx quickly and retries for days otherwise, so the request does
+ * the minimum — check the signature, find the triggers, note the event — and
+ * answers 200 even when there's nothing to do. The agents run in `after`.
  */
 export async function POST(request: NextRequest) {
   const secret = await getStripeEndpointSecret();
@@ -49,7 +51,7 @@ export async function POST(request: NextRequest) {
   }
 
   if (event.type === STRIPE_DEAUTHORIZED_EVENT) {
-    await markStripeDisconnected(event.account);
+    await markStripeAccountDisconnected(event.account);
     return Response.json({ received: true });
   }
 

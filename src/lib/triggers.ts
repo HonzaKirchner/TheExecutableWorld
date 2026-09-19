@@ -5,37 +5,39 @@ import { publicBaseUrl } from "@/lib/base-url";
 /**
  * The kinds of trigger an agent can have. Each one is a webhook that an OAuth
  * app somewhere else calls: Slack's Events API for the agent's own Slack app,
- * Stripe's Connect webhook for a Stripe account the person connects, Gmail's
- * push notifications (via Pub/Sub) for a mailbox the agent has been given.
+ * Stripe's Connect webhook for the Stripe account the agent's workspace has
+ * connected (src/lib/stripe-connections.ts), Gmail's push notifications (via
+ * Pub/Sub) for a mailbox the agent has been given.
  */
 export type TriggerKind = "slack" | "stripe" | "gmail";
 
+/**
+ * None of them is added to an agent unasked: a trigger exists once someone
+ * has chosen its events. Slack differs from the others only in what comes
+ * before that — every agent already has a Slack app, so there is nothing to
+ * connect first.
+ */
 export type TriggerDefinition = {
   id: TriggerKind;
   name: string;
   description: string;
-  /** Added to every agent without asking. */
-  automatic: boolean;
 };
 
 export const TRIGGERS: readonly TriggerDefinition[] = [
   {
     id: "slack",
     name: "Slack",
-    description: "Runs when someone @mentions the agent or sends it a direct message.",
-    automatic: true,
+    description: "Runs when someone @mentions the agent, sends it a direct message, or on other Slack events.",
   },
   {
     id: "stripe",
     name: "Stripe",
     description: "Runs on payment events — a refund, a failed charge, a new subscription.",
-    automatic: false,
   },
   {
     id: "gmail",
     name: "Gmail",
     description: "Runs when an email lands in the inbox of the connected Google account.",
-    automatic: false,
   },
 ];
 
@@ -48,9 +50,10 @@ export function getTriggerDefinition(kind: TriggerKind) {
 }
 
 /**
- * `active`: events flow. `pending`: a Stripe connection is waiting for the
- * person to come back from Stripe. `disconnected`: the account revoked the
- * platform's access (Stripe told us so; Google refused to refresh).
+ * `active`: events flow. `pending`: set up but not yet confirmed by the
+ * service. `disconnected`: Google refused to refresh the tokens. A Stripe
+ * trigger is always `active`: whether its events arrive depends on the
+ * workspace's Stripe connection, not on the trigger.
  */
 export type TriggerStatus = "active" | "pending" | "disconnected";
 
@@ -61,7 +64,7 @@ export type Trigger = {
   status: TriggerStatus;
   /** Event ids the trigger listens for — Slack event names or Stripe event types. */
   events: string[];
-  /** Stripe: the connected account (`acct_…`). Gmail: the mailbox's address. */
+  /** Gmail: the mailbox's address. */
   accountId: string | null;
   /** Gmail: where in the mailbox's history the next notification picks up. */
   historyId: string | null;
@@ -146,11 +149,12 @@ export async function getTrigger(agentId: string, kind: TriggerKind): Promise<Tr
 }
 
 /**
- * The id may be chosen by the caller: the Slack app's manifest has to carry
- * the webhook URL before the agent — and so the trigger — can be inserted.
+ * For Slack, the row comes first and the manifest second: the id is the
+ * webhook's path, which Slack verifies with a challenge the moment the URL
+ * lands in the manifest, and the challenge is only answered for a trigger
+ * that exists.
  */
 export async function createTrigger(input: {
-  id?: string;
   agentId: string;
   kind: TriggerKind;
   events: readonly string[];
@@ -159,16 +163,10 @@ export async function createTrigger(input: {
   await ensureSchema();
   const sql = db();
   const rows = (await sql.query(
-    `insert into triggers (id, agent_id, kind, status, config)
-     values (coalesce($1::uuid, gen_random_uuid()), $2, $3, $4, $5::jsonb)
+    `insert into triggers (agent_id, kind, status, config)
+     values ($1, $2, $3, $4::jsonb)
      returning ${TRIGGER_COLUMNS}`,
-    [
-      input.id ?? null,
-      input.agentId,
-      input.kind,
-      input.status ?? "active",
-      JSON.stringify({ events: [...input.events] }),
-    ],
+    [input.agentId, input.kind, input.status ?? "active", JSON.stringify({ events: [...input.events] })],
   )) as TriggerRow[];
   return toTrigger(rows[0]);
 }
@@ -190,68 +188,28 @@ export async function deleteTrigger(triggerId: string) {
   await sql`delete from triggers where id = ${triggerId}`;
 }
 
-/** Remembers the `state` of a Stripe connection that has just been started. */
-export async function setTriggerOAuthState(triggerId: string, state: string) {
-  await ensureSchema();
-  const sql = db();
-  await sql`update triggers set oauth_state = ${state}, status = 'pending' where id = ${triggerId}`;
-}
-
-/**
- * Resolves the `state` Stripe sent back. The workspace comes along so the
- * callback can check it against the session.
+/*
+ * Stripe. The account is the workspace's (src/lib/stripe-connections.ts); a
+ * trigger is one agent's list of event types on it.
  */
-export async function getTriggerByOAuthState(
-  state: string,
-): Promise<(Trigger & { workspaceId: string }) | null> {
-  await ensureSchema();
-  const sql = db();
-  const rows = (await sql.query(
-    `select t.id, t.agent_id, t.kind, t.status, t.config, t.account_id,
-            t.last_event_at, t.last_event_type, t.created_at, a.workspace_id
-     from triggers t
-     join agents a on a.id = t.agent_id
-     where t.oauth_state = $1
-     limit 1`,
-    [state],
-  )) as (TriggerRow & { workspace_id: string })[];
-  const row = rows[0];
-  return row ? { ...toTrigger(row), workspaceId: row.workspace_id } : null;
-}
-
-export async function markStripeConnected(triggerId: string, accountId: string) {
-  await ensureSchema();
-  const sql = db();
-  await sql`
-    update triggers
-    set account_id = ${accountId}, status = 'active', oauth_state = null
-    where id = ${triggerId}
-  `;
-}
-
-/** Stripe said the account disconnected from the platform. */
-export async function markStripeDisconnected(accountId: string) {
-  await ensureSchema();
-  const sql = db();
-  await sql`
-    update triggers
-    set status = 'disconnected'
-    where kind = 'stripe' and account_id = ${accountId}
-  `;
-}
 
 /**
- * The triggers a Stripe event is for: those on the account it came from that
- * listen for its type. Several agents can watch the same account.
+ * The triggers a Stripe event is for: every agent in a workspace connected to
+ * the account it came from whose list includes its type. One install, many
+ * agents — and, should the same account be connected to two workspaces, both
+ * of them.
  */
 export async function findStripeTriggers(accountId: string, eventType: string): Promise<Trigger[]> {
   await ensureSchema();
   const sql = db();
   const rows = (await sql.query(
-    `select ${TRIGGER_COLUMNS}
-     from triggers
-     where kind = 'stripe' and status = 'active' and account_id = $1
-       and config->'events' ? $2`,
+    `select ${TRIGGER_COLUMNS.split(", ").map((column) => `t.${column}`).join(", ")}
+     from triggers t
+     join agents a on a.id = t.agent_id
+     join stripe_connections c on c.workspace_id = a.workspace_id
+     where t.kind = 'stripe' and t.status = 'active'
+       and c.status = 'active' and c.account_id = $1
+       and t.config->'events' ? $2`,
     [accountId, eventType],
   )) as TriggerRow[];
   return rows.map(toTrigger);

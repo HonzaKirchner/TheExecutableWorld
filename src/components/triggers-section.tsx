@@ -1,9 +1,12 @@
 import Link from "next/link";
 import { ChevronRight, Link2, Zap } from "lucide-react";
 
+import { connectMcpServerAction } from "@/app/app/[agentId]/access/actions";
+import { connectStripeAction, startGmailWatchAction } from "@/app/app/[agentId]/triggers/actions";
 import type { Agent } from "@/lib/agents";
 import { isGmailTriggerConfigured } from "@/lib/gmail/google";
 import { isStripeConfigured } from "@/lib/stripe";
+import { isStripeConnected, type StripeConnection } from "@/lib/stripe-connections";
 import {
   gmailWatchLapsed,
   slackEventsUrl,
@@ -12,9 +15,9 @@ import {
   type TriggerKind,
 } from "@/lib/triggers";
 import {
-  InstallSlackTriggerCard,
-  InstallSlackTriggerLabel,
-} from "@/components/triggers/install-slack-trigger-card";
+  ConnectTriggerCard,
+  ConnectTriggerLabel,
+} from "@/components/triggers/connect-trigger-card";
 import { Badge } from "@/components/ui/badge";
 import {
   Tooltip,
@@ -25,15 +28,26 @@ import {
 
 type Tone = "emerald" | "amber" | "rose" | "muted";
 
+/** What clicking a not-yet-connected card does: the action, its inputs, and the footer line. */
+type Connect = {
+  action: React.ComponentProps<typeof ConnectTriggerCard>["action"];
+  fields?: Record<string, string>;
+  label: string;
+  pendingLabel: string;
+};
+
 export function TriggersSection({
   agent,
   triggers,
   gmailConnected,
+  stripeConnection,
 }: {
   agent: Agent;
   triggers: Trigger[];
   /** Whether the agent's Gmail MCP connection is authorized — the Gmail trigger listens through it. */
   gmailConnected: boolean;
+  /** The workspace's Stripe account, shared by all its agents; null until one is connected. */
+  stripeConnection: StripeConnection | null;
 }) {
   const byKind = new Map(triggers.map((trigger) => [trigger.kind, trigger]));
   const configured: Record<TriggerKind, boolean> = {
@@ -46,18 +60,28 @@ export function TriggersSection({
     <section className="mt-12">
       <h2 className="text-lg font-semibold tracking-tight">Triggers</h2>
       <p className="mt-1 text-sm text-muted-foreground">
-        What makes this coworker act. Open one to choose its events.
+        What makes this coworker act. Nothing wakes it until you choose events — Slack is
+        ready for that as is; Stripe and Gmail connect first.
       </p>
 
       <ul className="mt-6 grid gap-3 sm:grid-cols-2">
         {TRIGGERS.map((definition, i) => {
           const trigger = byKind.get(definition.id) ?? null;
           const available = configured[definition.id];
-          const { tone, label, hint } = describe(definition.id, trigger, agent, available, gmailConnected);
+          const { tone, label, hint } = describe(
+            definition.id,
+            trigger,
+            agent,
+            available,
+            gmailConnected,
+            stripeConnection,
+          );
           const active = tone === "emerald";
-          // Until the app is installed the Slack card starts the install
-          // itself instead of opening a page that can't do anything yet.
-          const installs = definition.id === "slack" && Boolean(trigger) && !agent.slackInstalledAt;
+          // Until the trigger is connected its card starts the connection
+          // itself instead of opening a page whose only button would do that.
+          const connect = available
+            ? connectFor(definition.id, trigger, agent, gmailConnected, stripeConnection)
+            : null;
 
           const body = (
             <>
@@ -93,11 +117,11 @@ export function TriggersSection({
                   </div>
                 ) : null}
 
-                {installs ? (
-                  <InstallSlackTriggerLabel />
+                {connect ? (
+                  <ConnectTriggerLabel label={connect.label} pendingLabel={connect.pendingLabel} />
                 ) : available ? (
                   <span className="mt-3 flex items-center gap-0.5 text-xs text-muted-foreground transition-colors group-hover:text-foreground">
-                    {trigger ? "Manage events" : "Set up"}
+                    {trigger?.events.length ? "Manage events" : "Choose events"}
                     <ChevronRight className="size-3.5" />
                   </span>
                 ) : null}
@@ -110,10 +134,15 @@ export function TriggersSection({
 
           return (
             <li key={definition.id} style={{ animationDelay: `${i * 30}ms` }} className="contents">
-              {installs ? (
-                <InstallSlackTriggerCard agentId={agent.id} className={className}>
+              {connect ? (
+                <ConnectTriggerCard
+                  action={connect.action}
+                  agentId={agent.id}
+                  fields={connect.fields}
+                  className={className}
+                >
                   {body}
-                </InstallSlackTriggerCard>
+                </ConnectTriggerCard>
               ) : available ? (
                 <Link
                   href={`/app/${agent.id}/triggers/${definition.id}`}
@@ -136,21 +165,65 @@ export function TriggersSection({
   );
 }
 
+/**
+ * How a trigger that isn't connected yet gets connected, or nothing when it
+ * already is and the card should open its page instead. Slack has nothing
+ * to connect — every agent has its app — so its card always opens the page,
+ * where the events are chosen; the install lives on the agent's page.
+ * Stripe needs the workspace's account connected, which any one agent does
+ * for all of them; Gmail needs its connection authorized and then the
+ * mailbox watched, which are two clicks when starting from scratch — the
+ * first one carries straight into the second.
+ */
+function connectFor(
+  kind: TriggerKind,
+  trigger: Trigger | null,
+  agent: Agent,
+  gmailConnected: boolean,
+  stripeConnection: StripeConnection | null,
+): Connect | null {
+  if (kind === "slack") return null;
+
+  if (kind === "stripe") {
+    if (isStripeConnected(stripeConnection)) return null;
+    return { action: connectStripeAction, label: "Connect Stripe", pendingLabel: "Opening Stripe…" };
+  }
+
+  if (trigger?.status === "active") return null;
+  return gmailConnected
+    ? { action: startGmailWatchAction, label: "Start listening", pendingLabel: "Asking Gmail…" }
+    : {
+        action: connectMcpServerAction,
+        fields: { serverId: "gmail", returnTo: "trigger" },
+        label: "Connect Gmail",
+        pendingLabel: "Opening Google…",
+      };
+}
+
 function describe(
   kind: TriggerKind,
   trigger: Trigger | null,
   agent: Agent,
   available: boolean,
   gmailConnected: boolean,
+  stripeConnection: StripeConnection | null,
 ): { tone: Tone; label: string; hint?: string } {
   if (kind === "slack") {
-    if (!trigger) return { tone: "muted", label: "Not added" };
+    if (!trigger) {
+      return {
+        tone: "muted",
+        label: "Not listening",
+        hint: agent.slackInstalledAt
+          ? `Choose the Slack events that wake @${agent.handle}.`
+          : `Choose the events that should wake @${agent.handle}; they start arriving once the app is installed.`,
+      };
+    }
     return agent.slackInstalledAt
       ? { tone: "emerald", label: "Active" }
       : {
           tone: "amber",
           label: "Not installed",
-          hint: "Install the app to your workspace first; then choose the events it listens for.",
+          hint: "The events are chosen. Install the app from the panel below and they start arriving.",
         };
   }
 
@@ -165,10 +238,12 @@ function describe(
     if (!trigger || trigger.status === "pending") {
       return gmailConnected
         ? { tone: "muted", label: "Not listening", hint: "Gmail is connected. Start listening to wake the agent on new mail." }
-        : { tone: "muted", label: "Not connected", hint: "Connect Gmail under Access, then start listening here." };
+        : { tone: "muted", label: "Not connected", hint: "Connect the agent's Google account; it starts listening for new mail right away." };
     }
     if (trigger.status === "disconnected") {
-      return { tone: "rose", label: "Disconnected", hint: "Google stopped honouring the tokens. Connect Gmail again." };
+      return gmailConnected
+        ? { tone: "rose", label: "Disconnected", hint: "The mailbox watch stopped. Start listening again." }
+        : { tone: "rose", label: "Disconnected", hint: "Google stopped honouring the tokens. Connect Gmail again." };
     }
     return gmailWatchLapsed(trigger)
       ? { tone: "amber", label: "Renewal due", hint: "The mailbox watch has lapsed. Save the events to renew it." }
@@ -182,17 +257,18 @@ function describe(
       hint: "Set STRIPE_SECRET_KEY and STRIPE_INSTALL_LINK on the deployment to enable Stripe.",
     };
   }
-  if (!trigger) return { tone: "muted", label: "Not connected" };
-  switch (trigger.status) {
-    case "active":
-      return trigger.events.length > 0
-        ? { tone: "emerald", label: "Connected" }
-        : { tone: "amber", label: "No events yet", hint: "Connected — choose the events to listen for." };
-    case "pending":
-      return { tone: "amber", label: "Waiting for Stripe" };
-    case "disconnected":
-      return { tone: "rose", label: "Disconnected", hint: "The account revoked access. Connect it again." };
+  // The account is the workspace's; the trigger is only this agent's events.
+  if (!isStripeConnected(stripeConnection)) {
+    return stripeConnection?.status === "disconnected"
+      ? { tone: "rose", label: "Disconnected", hint: "The Stripe account revoked access. Connect it again, once for the whole workspace." }
+      : { tone: "muted", label: "Not connected", hint: "Connect a Stripe account once; every agent in the workspace can then pick its events." };
   }
+  if (!trigger) {
+    return { tone: "muted", label: "Not listening", hint: `Stripe is connected. Choose the events @${agent.handle} should hear about.` };
+  }
+  return trigger.events.length > 0
+    ? { tone: "emerald", label: "Listening" }
+    : { tone: "amber", label: "No events yet", hint: "Stripe is connected — choose the events to listen for." };
 }
 
 function Status({ tone, children }: { tone: Tone; children: React.ReactNode }) {

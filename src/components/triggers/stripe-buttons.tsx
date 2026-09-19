@@ -10,6 +10,7 @@ import {
 import {
   connectStripeAction,
   disconnectStripeAction,
+  stopStripeEventsAction,
   type TriggerActionState,
 } from "@/app/app/[agentId]/triggers/actions";
 import { Button } from "@/components/ui/button";
@@ -68,9 +69,10 @@ export function ConnectStripeToolsButton({ agentId }: { agentId: string }) {
   );
 }
 
-export function DisconnectStripeButton({ agentId }: { agentId: string }) {
+/** This one agent stops listening; the workspace's account stays connected. */
+export function StopStripeEventsButton({ agentId }: { agentId: string }) {
   const [state, formAction, pending] = useActionState<TriggerActionState, FormData>(
-    disconnectStripeAction,
+    stopStripeEventsAction,
     {},
   );
 
@@ -78,7 +80,7 @@ export function DisconnectStripeButton({ agentId }: { agentId: string }) {
     <form
       action={formAction}
       onSubmit={(event) => {
-        if (!confirm("Disconnect Stripe? The agent stops receiving its events.")) {
+        if (!confirm("Stop listening to Stripe? This agent stops receiving its events.")) {
           event.preventDefault();
         }
       }}
@@ -94,7 +96,50 @@ export function DisconnectStripeButton({ agentId }: { agentId: string }) {
         className="gap-1.5 text-muted-foreground"
       >
         {pending ? <Loader2 className="size-3.5 animate-spin" /> : <Unplug className="size-3.5" />}
-        Disconnect
+        Stop listening
+      </Button>
+    </form>
+  );
+}
+
+/**
+ * Disconnects the account from the whole workspace. `listeners` is how many
+ * agents that switches off, so the confirmation can say so.
+ */
+export function DisconnectStripeButton({ agentId, listeners }: { agentId: string; listeners: number }) {
+  const [state, formAction, pending] = useActionState<TriggerActionState, FormData>(
+    disconnectStripeAction,
+    {},
+  );
+
+  const affected =
+    listeners === 0
+      ? "No agent is listening to it yet."
+      : listeners === 1
+        ? "The one agent listening to it stops receiving events."
+        : `All ${listeners} agents listening to it stop receiving events.`;
+
+  return (
+    <form
+      action={formAction}
+      onSubmit={(event) => {
+        if (!confirm(`Disconnect Stripe from this workspace? ${affected}`)) {
+          event.preventDefault();
+        }
+      }}
+      className="flex items-center gap-2"
+    >
+      <input type="hidden" name="agentId" value={agentId} />
+      {state.error ? <p className="text-xs text-destructive">{state.error}</p> : null}
+      <Button
+        type="submit"
+        variant="ghost"
+        size="sm"
+        disabled={pending}
+        className="gap-1.5 text-muted-foreground"
+      >
+        {pending ? <Loader2 className="size-3.5 animate-spin" /> : <Unplug className="size-3.5" />}
+        Disconnect workspace
       </Button>
     </form>
   );

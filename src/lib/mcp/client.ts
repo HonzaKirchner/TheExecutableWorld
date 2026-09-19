@@ -6,6 +6,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { serverOAuthOptions } from "@/lib/mcp/catalog";
 import type { DiscoveredTool, McpConnection } from "@/lib/mcp/connections";
 import { DbOAuthClientProvider } from "@/lib/mcp/oauth-provider";
+import type { McpReturnTo } from "@/lib/mcp/return-to";
 
 const CLIENT_INFO = { name: "coworkers", version: "0.1.0" };
 
@@ -21,11 +22,19 @@ export type ConnectResult =
  * server says they've expired, and only falls back to a redirect when that
  * fails too. So a connection that was authorized once keeps working here
  * until the person revokes it on the server's side.
+ *
+ * `returnTo` is where the callback should land the person if they are sent
+ * off; the caller handles the no-redirect case itself.
  */
 export async function connectAndListTools(
   connection: Pick<McpConnection, "id" | "serverId" | "serverUrl">,
+  { returnTo = "access" }: { returnTo?: McpReturnTo } = {},
 ): Promise<ConnectResult> {
-  const provider = new DbOAuthClientProvider(connection.id, serverOAuthOptions(connection.serverId));
+  const provider = new DbOAuthClientProvider(
+    connection.id,
+    serverOAuthOptions(connection.serverId),
+    returnTo,
+  );
   const client = new Client(CLIENT_INFO);
   const transport = new StreamableHTTPClientTransport(new URL(connection.serverUrl), {
     authProvider: provider,
@@ -83,12 +92,14 @@ export type McpSession = {
 /**
  * Opens a session on an already-authorized connection. Unlike the configure
  * time path this never redirects: a run has no person in front of it, so an
- * expired authorization that the SDK cannot refresh is simply an error.
+ * expired authorization that the SDK cannot refresh is simply an error. The
+ * server's options still matter here — a refresh needs the pre-registered
+ * client, and a server with no authorization at all should say so.
  */
 export async function openMcpSession(
   connection: Pick<McpConnection, "id" | "serverId" | "serverUrl">,
 ): Promise<McpSession> {
-  const provider = new DbOAuthClientProvider(connection.id);
+  const provider = new DbOAuthClientProvider(connection.id, serverOAuthOptions(connection.serverId));
   const client = new Client(CLIENT_INFO);
   const transport = new StreamableHTTPClientTransport(new URL(connection.serverUrl), {
     authProvider: provider,

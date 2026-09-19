@@ -13,9 +13,10 @@ Next.js (App Router) + Tailwind v4 + shadcn/ui, with Slack sign-in via Auth.js. 
 | `/app/[agentId]`                     | Agent detail: instructions, triggers, access, install to Slack |
 | `/app/[agentId]/access/[serverId]`   | Which of a server's tools the agent may call                   |
 | `/api/mcp/callback`                  | Where MCP authorization servers send people back to            |
+| `/api/mcp/slack`                     | The Slack MCP server this app hosts — tools that act as an agent's own Slack app |
 | `/api/slack/install/callback`        | Where Slack sends people back to after installing an agent     |
 | `/api/slack/events/[triggerId]`      | Where Slack delivers an agent's events (mentions, DMs)         |
-| `/app/[agentId]/triggers/[kind]`     | A trigger's detail: connect (Stripe), choose events            |
+| `/app/[agentId]/triggers/[kind]`     | A trigger's detail: connect (Stripe, once per workspace), choose events |
 | `/api/stripe/connect/callback`       | Where Stripe Connect sends people back to                      |
 | `/api/stripe/events`                 | The platform's Connect webhook — events from every connected Stripe account |
 
@@ -147,7 +148,8 @@ Seven tables, created by [src/lib/db.ts](src/lib/db.ts):
 | `agents`              | `uuid`                    | `workspace_id`, `handle`, `description`, `instructions`, `model`, plus the Slack app it owns and — once installed — its bot token |
 | `mcp_connections`     | `uuid`, unique per (agent, server) | An agent's link to one MCP server: OAuth client, tokens, in-flight `state`/verifier, cached discovery |
 | `mcp_tools`           | (connection, tool name)   | The server's tools as last listed, with `allowed` and `requires_approval` |
-| `triggers`            | `uuid`, unique per (agent, kind) | What makes an agent act: `config.events`, `status`, and for Stripe the connected `account_id` and the last event seen |
+| `triggers`            | `uuid`, unique per (agent, kind) | What makes an agent act: `config.events`, `status`, for Gmail the mailbox in `account_id`, and the last event seen |
+| `stripe_connections`  | Slack team id             | The workspace's Stripe account — one install of the Stripe App shared by all its agents — with the `state` of an install in flight and the agent it started from |
 | `stripe_webhook_endpoint` | `'default'`           | The platform's one Connect webhook endpoint at Stripe, with its signing secret |
 | `slack_config_tokens` | Slack team id             | That workspace's current app configuration token pair — the workspace its agents' Slack apps are created in |
 
@@ -213,10 +215,10 @@ the agent follows and are shown first on its page. Submitting the dialog runs
    creation is rate limited and an orphaned app has to be cleaned up by hand;
 4. stores the workspace's app configuration token if the dialog asked for one (below) —
    after the other fields are known good, because saving it spends it;
-5. creates a Slack app from a manifest via `apps.manifest.create` — with event
-   subscriptions pointing at the agent's webhook (below);
-6. stores the agent and its Slack trigger with the credentials Slack hands back, and
-   redirects to its page.
+5. creates a Slack app from a manifest via `apps.manifest.create` — subscribed to no
+   events and asking for the base bot scopes only; events and tools are chosen later,
+   and each choice updates the manifest (below);
+6. stores the agent with the credentials Slack hands back, and redirects to its page.
 
 If the insert fails after the app exists, the app is deleted again so the workspace
 doesn't collect orphans.
@@ -254,10 +256,13 @@ settings page, which doesn't exist yet.
 
 ## Triggers
 
-The **Triggers** section lists what makes an agent act: **Slack**, which every agent gets
-automatically, and **Stripe** and **Gmail**, which the person connects. Opening a trigger
-shows its webhook, the last event it received, and lets the person choose the events it
-listens for; the choice is stored in `triggers.config.events`.
+The **Triggers** section lists what makes an agent act: **Slack**, **Stripe** and
+**Gmail**. None is added unasked — a trigger exists once the person has chosen its
+events, and the first save is what creates it. Opening a trigger shows its webhook, the
+last event it received, and lets the person choose the events it listens for; the choice
+is stored in `triggers.config.events`. Slack differs from the other two only in what
+comes before: every agent already has a Slack app, so there is nothing to connect and the
+card goes straight to the page.
 
 ### Slack
 
@@ -265,31 +270,35 @@ A Slack trigger is the agent's own app's Events API subscription: the trigger's 
 the last path segment of `/api/slack/events/[triggerId]`, and that URL goes into the app's
 manifest as `request_url`. The events on offer, and the bot scope each one needs, are in
 [src/lib/slack-events-catalog.ts](src/lib/slack-events-catalog.ts); `app_mention` is
-always on and new agents also get `message.im`. Saving a different set runs
-`apps.manifest.update` with the new `bot_events` and the scopes derived from them, then
-stores the choice. Slack applies new scopes to an *installed* app only when it is
-installed again, so the install records the scopes it granted (`agents.slack_bot_scopes`)
-and the agent's page turns the install panel amber with a **Reinstall** button while the
-events need more than that.
+always on once the agent listens at all, and the page preselects `message.im` alongside
+it for an agent that hasn't chosen yet. Saving runs `apps.manifest.update` with the new
+`bot_events` and the scopes derived from them (plus those of the Slack tools allowed
+under Access, below), then stores the choice. The first save creates the trigger — the
+row goes in before the manifest, because Slack challenges the URL as soon as it sees it
+and the endpoint only answers for a trigger that exists; if Slack then rejects the
+manifest the row is deleted again. **Stop listening** takes the subscription out of the
+manifest and deletes the trigger; the app stays installed and its tools keep working.
 
-The id has to be known before the app is created (the manifest carries the URL), so the
-action generates it up front and inserts the trigger right after the agent.
+Slack applies new scopes to an *installed* app only when it is installed again, so the
+install records the scopes it granted (`agents.slack_bot_scopes`) and the agent's page
+turns the install panel amber with a **Reinstall** button while the events and tools
+need more than that. [src/lib/slack-access.ts](src/lib/slack-access.ts) is where the
+manifest, the install's scopes and the tools meet: it builds the manifest from the
+trigger and the allowed tools, and computes the scopes an install has to ask for.
 
-Until the app is installed the trigger's card on the agent's page doesn't open a page: it
-**starts the install** (`installSlackAppAction` with `returnTo=trigger`), because nothing
-on the trigger page can do anything before that. Slack's callback then lands on the
-trigger's page, where choosing events is the next step; the trigger page also offers the
-install itself, for anyone who gets there first. The destination rides inside the OAuth
-`state` — `<random>.agent` or `<random>.trigger`, a suffix Slack returns verbatim
-([src/lib/slack-install.ts](src/lib/slack-install.ts)) — so the install panel at the bottom
-of the agent's page keeps landing on the agent's page. A `state` without a suffix, from an
-install started before this existed, resolves to the agent's page too.
+The trigger page offers the install too, for anyone who gets there before installing;
+events can be chosen either way, and an install after the choice asks for exactly what
+it needs. The destination of an install rides inside the OAuth `state` —
+`<random>.agent` or `<random>.trigger`, a suffix Slack returns verbatim
+([src/lib/slack-install.ts](src/lib/slack-install.ts)) — so the install panel at the
+bottom of the agent's page keeps landing on the agent's page. A `state` without a
+suffix, from an install started before this existed, resolves to the agent's page too.
 
-**Slack verifies the URL with a challenge when the manifest is created**, so the endpoint
-must be deployed before agents can be created — from local development too. That's what
+**Slack verifies the URL with a challenge when it lands in the manifest**, so the endpoint
+must be deployed before an agent can subscribe to events — from local development too. That's what
 `PUBLIC_BASE_URL` is for: the production origin, used only for this URL. Everything else
 (OAuth redirects) keeps using `APP_BASE_URL` / `AUTH_URL`, which can stay on `localhost`.
-Locally you'll create agents whose events go to production; production and local share
+Locally you'll subscribe agents whose events go to production; production and local share
 the database, so the production endpoint finds them.
 
 The endpoint ([route.ts](src/app/api/slack/events/[triggerId]/route.ts)):
@@ -321,8 +330,11 @@ Two facts from Stripe's docs shape the design:
   (`connect=true`), each event carrying the `account` it came from. Stripe only delivers
   events the app holds permissions for, so the app's manifest grants the read permission
   for every object, and the endpoint subscribes to `*`. One installation then serves
-  every agent: each trigger keeps its own list of event types, and the events route
-  drops everything else. Changing what an agent listens to never touches Stripe.
+  every agent: the account is connected **once per workspace**
+  ([src/lib/stripe-connections.ts](src/lib/stripe-connections.ts)), each agent's trigger
+  is only its own list of event types, and the events route fans an event out to every
+  agent in the account's workspace whose list has its type and drops everything else.
+  Adding an agent or changing what one listens to never touches Stripe.
 
 Setting up the app (once, with the Stripe CLI):
 
@@ -350,27 +362,35 @@ app creates the endpoint (below).
 
 The flow, in [triggers/actions.ts](src/app/app/[agentId]/triggers/actions.ts):
 
-1. **Connect Stripe** creates a `pending` trigger with an OAuth `state` and redirects to
-   the install link with `redirect_uri` and `state` set.
+1. **Connect Stripe**, on any agent's card or trigger page while the workspace has no
+   account, writes the workspace's `stripe_connections` row with an OAuth `state` and the
+   agent it was started from, and redirects to the install link with `redirect_uri` and
+   `state` set. A workspace that is already connected keeps its account until the new
+   code is exchanged, so an abandoned reconnect changes nothing.
 2. `/api/stripe/connect/callback` resolves the `state`, checks the session's workspace,
-   exchanges the code for the account id, and marks the trigger active.
+   exchanges the code for the account id, marks the workspace connected, and lands the
+   person back on the trigger page they left from.
 3. The callback also runs `syncStripeEndpoint()`
    ([src/lib/stripe-webhook.ts](src/lib/stripe-webhook.ts)), which the first time creates
    the endpoint via `POST /v1/webhook_endpoints` with `connect=true`,
    `url=<PUBLIC_BASE_URL>/api/stripe/events` and `enabled_events=["*"]`, and stores the
    signing secret Stripe returns only then. Saving events runs it again in case that
-   failed. The person picks events — a curated catalog in
-   [src/lib/stripe-events.ts](src/lib/stripe-events.ts) plus any event type typed in —
-   and the list is stored on the trigger.
+   failed. From here on every agent in the workspace picks events without another
+   install — a curated catalog in [src/lib/stripe-events.ts](src/lib/stripe-events.ts)
+   plus any event type typed in — and the first save creates the agent's trigger, which
+   is nothing but that list.
 4. `/api/stripe/events` verifies `Stripe-Signature` (HMAC-SHA256 over `t.body`, five-minute
-   window), finds the active triggers for `event.account` whose lists include
-   `event.type`, and records the event on them; events no trigger asked for are
-   acknowledged and dropped. `account.application.deauthorized` (sent
-   when the account uninstalls the app) marks its triggers `disconnected`. It answers 200
-   in every case Stripe shouldn't retry.
-5. **Disconnect** deletes the trigger and, if no other agent listens to the account, tries
-   `/oauth/deauthorize` — documented for Connect, so treated as best effort; uninstalling
-   from the account's Dashboard is the sure way.
+   window), finds every agent whose workspace is connected to `event.account` and whose
+   trigger lists `event.type`, records the event on those triggers and runs the agents in
+   parallel; events no trigger asked for are acknowledged and dropped.
+   `account.application.deauthorized` (sent when the account uninstalls the app) marks
+   the workspace's connection `disconnected`, which silences all its agents at once. It
+   answers 200 in every case Stripe shouldn't retry.
+5. **Stop listening** on a trigger page deletes that agent's trigger only. **Disconnect
+   workspace** removes the account from every agent at once and, unless another
+   workspace uses the same account, tries `/oauth/deauthorize` — documented for Connect,
+   so treated as best effort; uninstalling from the account's Dashboard is the sure way.
+   The agents' event lists stay in place, inert, so connecting again resumes them.
 
 As with Slack, the events URL has to be reachable from the internet, so it uses
 `PUBLIC_BASE_URL`; Stripe events for agents created locally arrive in production, which
@@ -558,6 +578,23 @@ over `https://localhost:3003`, whose certificate Node doesn't trust out of the b
 `NODE_EXTRA_CA_CERTS` to the mkcert root (`$(mkcert -CAROOT)/rootCA.pem`) when running
 `npm run dev` to connect Gmail in development.
 
+**Slack** is served by this app as well, at `/api/mcp/slack`
+([src/lib/slack-mcp-server.ts](src/lib/slack-mcp-server.ts)), and is the one server with
+no OAuth of its own. Every agent's Slack app is installed with a bot token, and the tools
+— send a message or DM, list and join channels, read a channel or a thread, find a person,
+react — call Slack's Web API with whatever bearer token is on the request, checked with
+`auth.test`. **Connect** therefore needs the app installed and nothing else:
+`seedSlackConnection` creates the connection row and writes the bot token into it as the
+token pair, and every later connection (the tool page, a run) speaks with it; a reinstall
+writes the new token in. Each tool needs bot scopes of its own
+([src/lib/slack-tools-catalog.ts](src/lib/slack-tools-catalog.ts)), asked for only once
+the tool is allowed: saving access to the Slack server updates the manifest first, as
+saving events does, and the agent's page asks for a reinstall while the install lacks
+something. A tool called before that reinstall answers with Slack's `missing_scope`,
+turned into a tool error that says so. The Slack trigger's page carries the same card
+under **Actions**, as Stripe's does, since being woken by Slack and acting in it are two
+grants.
+
 Everything the OAuth client needs later — registered client, token pair, PKCE verifier,
 discovered endpoints — lives on the connection row, because the next request may run on
 a different serverless instance. [src/lib/mcp/oauth-provider.ts](src/lib/mcp/oauth-provider.ts)
@@ -619,6 +656,8 @@ src/
       [serverId]/page.tsx       Tool picker for one MCP server
     api/auth/[...nextauth]/     Auth.js route handlers
     api/mcp/callback/           MCP OAuth callback
+    api/mcp/gmail/              The Gmail MCP server this app hosts
+    api/mcp/slack/              The Slack MCP server this app hosts
     api/slack/install/callback/ Slack install callback
     api/slack/events/[triggerId]/ Slack Events API webhook
     api/stripe/events/          Stripe Connect webhook
@@ -632,6 +671,10 @@ src/
     slack-apps.ts               App manifest (scopes, events) -> apps.manifest.create
     slack-install.ts            Install URL + oauth.v2.access
     slack-events.ts             Signature check, event shapes, reply
+    slack-events-catalog.ts     Slack events on offer + the scopes they need
+    slack-tools-catalog.ts      Slack MCP tools + the scopes they need
+    slack-mcp-server.ts         The hosted Slack MCP server (bot-token bearer)
+    slack-access.ts             Manifest from trigger + tools; seeds the Slack connection
     triggers.ts                 Trigger catalog + queries
     agent/
       run.ts                    The harness: one model call loop, trigger-agnostic

@@ -1,3 +1,5 @@
+import { slackToolScopes } from "@/lib/slack-tools-catalog";
+
 /**
  * The Slack events an agent can subscribe to, and the bot scopes each one
  * needs. Client-safe: no I/O, imported by the trigger page's form as well as
@@ -66,12 +68,15 @@ export const SLACK_EVENTS: readonly SlackEventDefinition[] = [
   },
 ];
 
-/** What every agent listens for until someone changes it. */
+/**
+ * Preselected on the trigger page for an agent that hasn't chosen yet. No
+ * agent listens to Slack until someone saves a choice.
+ */
 export const DEFAULT_SLACK_EVENTS: readonly string[] = ["app_mention", "message.im"];
 
 /**
- * Needed regardless of events: posting replies, opening DMs, and looking up
- * who is talking.
+ * Needed regardless of events and tools: posting replies, opening DMs, and
+ * looking up who is talking.
  */
 export const BASE_BOT_SCOPES: readonly string[] = [
   "chat:write",
@@ -95,18 +100,27 @@ export function normalizeSlackEvents(ids: Iterable<string>): string[] {
   );
 }
 
-/** The bot scopes a manifest (and an install) needs for these events. */
-export function botScopesFor(eventIds: Iterable<string>): string[] {
+/**
+ * The bot scopes a manifest (and an install) needs: the base set, what the
+ * events need, and what the Slack tools the agent may call need
+ * (src/lib/slack-tools-catalog.ts).
+ */
+export function botScopesFor(eventIds: Iterable<string>, toolNames: Iterable<string> = []): string[] {
   const scopes = new Set(BASE_BOT_SCOPES);
   for (const id of eventIds) {
     for (const scope of getSlackEvent(id)?.scopes ?? []) scopes.add(scope);
   }
+  for (const scope of slackToolScopes(toolNames)) scopes.add(scope);
   return [...scopes].sort();
 }
 
-/** Scopes the events need that the last install did not grant. */
-export function missingScopes(eventIds: Iterable<string>, granted: readonly string[] | null) {
+/** Scopes the events and tools need that the last install did not grant. */
+export function missingScopes(
+  eventIds: Iterable<string>,
+  granted: readonly string[] | null,
+  toolNames: Iterable<string> = [],
+) {
   if (!granted) return [];
   const have = new Set(granted);
-  return botScopesFor(eventIds).filter((scope) => !have.has(scope));
+  return botScopesFor(eventIds, toolNames).filter((scope) => !have.has(scope));
 }

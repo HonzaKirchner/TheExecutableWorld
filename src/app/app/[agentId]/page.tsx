@@ -5,7 +5,9 @@ import { ArrowLeft, ArrowUpRight, CircleAlert, CircleCheck } from "lucide-react"
 import { auth } from "@/auth";
 import { getAgent } from "@/lib/agents";
 import { listConnections } from "@/lib/mcp/connections";
+import { allowedSlackTools } from "@/lib/slack-access";
 import { missingScopes } from "@/lib/slack-events-catalog";
+import { getStripeConnection } from "@/lib/stripe-connections";
 import { listTriggers } from "@/lib/triggers";
 import { AccessSection } from "@/components/access/access-section";
 import { InstallSlackPanel } from "@/components/access/install-slack-panel";
@@ -43,14 +45,18 @@ export default async function AgentDetailPage({
 
   if (!agent) notFound();
 
-  const [connections, triggers] = await Promise.all([
+  const [connections, triggers, stripeConnection, slackTools] = await Promise.all([
     listConnections(agent.id),
     listTriggers(agent.id),
+    getStripeConnection(agent.workspaceId),
+    allowedSlackTools(agent.id),
   ]);
   const installed = query.installed === "1";
   const slackTrigger = triggers.find((trigger) => trigger.kind === "slack");
+  // Events and allowed Slack tools both need scopes; the install has to
+  // cover all of them or it's due again.
   const missing = agent.slackInstalledAt
-    ? missingScopes(slackTrigger?.events ?? [], agent.slackBotScopes)
+    ? missingScopes(slackTrigger?.events ?? [], agent.slackBotScopes, slackTools)
     : [];
   const code = typeof query.error === "string" ? query.error : undefined;
   const error = code ? ERRORS[code] : undefined;
@@ -135,11 +141,12 @@ export default async function AgentDetailPage({
         gmailConnected={connections.some(
           (connection) => connection.serverId === "gmail" && connection.status === "authorized",
         )}
+        stripeConnection={stripeConnection}
       />
 
       <AccessSection agent={agent} connections={connections} />
 
-      <InstallSlackPanel agent={agent} missingScopes={missing} />
+      <InstallSlackPanel agent={agent} missingScopes={missing} listening={Boolean(slackTrigger)} />
     </div>
   );
 }

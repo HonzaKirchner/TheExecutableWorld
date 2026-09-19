@@ -226,9 +226,10 @@ async function createSchema() {
   `;
 
   // What the trigger listens for lives in `config` (`{ events: [...] }` for
-  // both kinds). The rest is Stripe's: which connected account the trigger
-  // belongs to, the OAuth `state` of a connection in flight, and the last
-  // event that arrived — the only sign, short of logs, that the webhook works.
+  // every kind). `account_id` is Gmail's mailbox address (Stripe's account
+  // moved to `stripe_connections`, below); `oauth_state` is no longer written;
+  // the last event that arrived is the only sign, short of logs, that the
+  // webhook works.
   await sql`
     alter table triggers
       add column if not exists config           jsonb not null default '{}'::jsonb,
@@ -263,6 +264,60 @@ async function createSchema() {
       created_at      timestamptz not null default now(),
       updated_at      timestamptz not null default now()
     )
+  `;
+
+  // A workspace's Stripe account: one install of the platform's Stripe App,
+  // shared by every agent in the workspace, each of which only picks event
+  // types on its trigger. Holds the OAuth `state` of an install in flight and
+  // the agent whose page it was started from, so the callback can go back.
+  await sql`
+    create table if not exists stripe_connections (
+      workspace_id    text primary key references workspaces (id) on delete cascade,
+      account_id      text,
+      livemode        boolean,
+      status          text not null default 'pending',
+      oauth_state     text,
+      oauth_agent_id  uuid references agents (id) on delete set null,
+      connected_at    timestamptz,
+      created_at      timestamptz not null default now(),
+      updated_at      timestamptz not null default now()
+    )
+  `;
+  await sql`
+    create index if not exists stripe_connections_account_idx
+      on stripe_connections (account_id)
+      where account_id is not null
+  `;
+  await sql`
+    create index if not exists stripe_connections_oauth_state_idx
+      on stripe_connections (oauth_state)
+      where oauth_state is not null
+  `;
+
+  // Stripe accounts used to be connected per agent, on the trigger row. Each
+  // workspace's newest one becomes its connection; the triggers keep their
+  // events and drop the account. Placeholders for installs that were never
+  // finished have nothing to carry over. All of it is a no-op once run.
+  await sql`
+    delete from triggers
+    where kind = 'stripe' and account_id is null and status = 'pending'
+  `;
+  await sql`
+    insert into stripe_connections (workspace_id, account_id, status, connected_at)
+    select distinct on (a.workspace_id)
+           a.workspace_id, t.account_id,
+           case when t.status = 'disconnected' then 'disconnected' else 'active' end,
+           t.created_at
+    from triggers t
+    join agents a on a.id = t.agent_id
+    where t.kind = 'stripe' and t.account_id is not null
+    order by a.workspace_id, t.created_at desc
+    on conflict (workspace_id) do nothing
+  `;
+  await sql`
+    update triggers
+    set account_id = null, oauth_state = null, status = 'active'
+    where kind = 'stripe' and (account_id is not null or status <> 'active')
   `;
 
   // Every agent gets a Slack trigger. Agents created before triggers existed

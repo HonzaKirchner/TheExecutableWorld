@@ -5,13 +5,17 @@ import { auth } from "@/auth";
 import { baseUrl } from "@/lib/base-url";
 import { connectAndListTools, finishAuthorization } from "@/lib/mcp/client";
 import { getConnectionByState, syncTools } from "@/lib/mcp/connections";
+import { landingAfterConnect, triggerPageFor } from "@/lib/mcp/landing";
+import { mcpReturnTo } from "@/lib/mcp/return-to";
 import { suggestApproval } from "@/lib/mcp/tools";
 
 /**
  * Where MCP authorization servers send people back to. Not behind the route
  * gate in src/proxy.ts (that only covers /app), so the session is checked
  * here — and matched against the agent the `state` belongs to, so a code
- * meant for one workspace can't be redeemed from another.
+ * meant for one workspace can't be redeemed from another. The `state` also
+ * says whether the person set out from a trigger's card; if so, that is
+ * where they go back to, with or without a connection.
  */
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
@@ -23,7 +27,9 @@ export async function GET(request: NextRequest) {
     return new Response("Unknown or expired authorization.", { status: 400 });
   }
 
-  const back = `/app/${connection.agentId}`;
+  const returnTo = mcpReturnTo(state!);
+  const agentPage = `/app/${connection.agentId}`;
+  const back = triggerPageFor(connection.agentId, connection.serverId, returnTo) ?? agentPage;
 
   const session = await auth();
   if (session?.slack?.teamId !== connection.workspaceId) {
@@ -49,8 +55,8 @@ export async function GET(request: NextRequest) {
     return redirectTo(back, { error: "mcp_failed" });
   }
 
-  revalidatePath(back);
-  return redirectTo(`${back}/access/${connection.serverId}`);
+  revalidatePath(agentPage);
+  return redirectTo(await landingAfterConnect(connection.agentId, connection.serverId, returnTo));
 }
 
 function redirectTo(path: string, query?: Record<string, string>) {

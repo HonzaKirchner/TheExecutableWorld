@@ -1,5 +1,3 @@
-import { randomBytes } from "node:crypto";
-
 import type {
   OAuthClientProvider,
   OAuthDiscoveryState,
@@ -19,6 +17,7 @@ import {
   updateCredentials,
   type McpCredentials,
 } from "@/lib/mcp/connections";
+import { newMcpState, type McpReturnTo } from "@/lib/mcp/return-to";
 
 export const MCP_CALLBACK_PATH = "/api/mcp/callback";
 
@@ -44,6 +43,9 @@ export class DbOAuthClientProvider implements OAuthClientProvider {
 
   private readonly options: ServerOAuthOptions;
 
+  /** Where the callback lands the person; carried in the `state` it gets back. */
+  private readonly returnTo: McpReturnTo;
+
   /** Set once the SDK has asked for the person to be sent off to authorize. */
   authorizationUrl: URL | undefined;
 
@@ -51,9 +53,14 @@ export class DbOAuthClientProvider implements OAuthClientProvider {
   // per connection attempt; one round trip is enough.
   private credentials: Promise<McpCredentials> | undefined;
 
-  constructor(connectionId: string, options: ServerOAuthOptions = {}) {
+  constructor(
+    connectionId: string,
+    options: ServerOAuthOptions = {},
+    returnTo: McpReturnTo = "access",
+  ) {
     this.connectionId = connectionId;
     this.options = options;
+    this.returnTo = returnTo;
   }
 
   get redirectUrl() {
@@ -75,12 +82,19 @@ export class DbOAuthClientProvider implements OAuthClientProvider {
   }
 
   async state() {
-    const state = randomBytes(24).toString("base64url");
+    const state = newMcpState(this.returnTo);
     await this.save({ oauthState: state });
     return state;
   }
 
+  /**
+   * The SDK asks for this only once a request has come back 401 and it is
+   * about to authorize. A server whose token isn't ours to renew (Slack's
+   * bot token) has nothing to authorize with, so that is the moment to say
+   * what actually happened.
+   */
   async clientInformation() {
+    if (this.options.noAuthorization) throw new Error(this.options.noAuthorization);
     return this.options.preregistered ?? (await this.load()).clientInformation ?? undefined;
   }
 

@@ -9,8 +9,14 @@ import { GMAIL_EVENTS } from "@/lib/gmail-events";
 import { getConnection, listTools } from "@/lib/mcp/connections";
 import { MCP_CALLBACK_PATH } from "@/lib/mcp/oauth-provider";
 import { baseUrl } from "@/lib/base-url";
-import { missingScopes, SLACK_EVENTS } from "@/lib/slack-events-catalog";
+import { allowedSlackTools } from "@/lib/slack-access";
+import { DEFAULT_SLACK_EVENTS, missingScopes, SLACK_EVENTS } from "@/lib/slack-events-catalog";
 import { isStripeConfigured, stripeConnectRedirectUri, stripeEventsUrl } from "@/lib/stripe";
+import {
+  countStripeListeners,
+  getStripeConnection,
+  isStripeConnected,
+} from "@/lib/stripe-connections";
 import { STRIPE_EVENTS } from "@/lib/stripe-events";
 import { getStripeEndpoint } from "@/lib/stripe-webhook";
 import {
@@ -31,13 +37,18 @@ import {
   ConnectStripeButton,
   ConnectStripeToolsButton,
   DisconnectStripeButton,
+  StopStripeEventsButton,
 } from "@/components/triggers/stripe-buttons";
+import { ConnectSlackToolsButton, StopSlackEventsButton } from "@/components/triggers/slack-buttons";
 import { TriggerEventsForm } from "@/components/triggers/trigger-events-form";
 import { InstallSlackButton } from "@/components/access/install-slack-button";
 import { Badge } from "@/components/ui/badge";
 
 /** The tool on Stripe's MCP server that performs every write, refunds included. */
 const STRIPE_WRITE_TOOL = "stripe_api_write";
+
+/** The tool on this app's Slack MCP server that posts as the agent. */
+const SLACK_SEND_TOOL = "send_message";
 
 const ERRORS: Record<string, string> = {
   stripe_failed: "Stripe didn't complete the connection. Try again.",
@@ -46,11 +57,15 @@ const ERRORS: Record<string, string> = {
   slack_failed: "Slack didn't complete the install. Try again.",
   slack_wrong_workspace:
     "The app was installed into a different Slack workspace than this agent belongs to, so the install was undone. Pick this workspace when Slack asks.",
+  mcp_failed: "Google didn't complete the connection. Try again.",
+  gmail_watch_failed:
+    "Gmail is connected, but the mailbox watch couldn't be started. Start listening to try again.",
 };
 
 const CANCELLATIONS: Record<string, string> = {
   stripe_denied: "The Stripe connection was cancelled.",
   slack_denied: "The Slack install was cancelled.",
+  mcp_denied: "The Google connection was cancelled.",
 };
 
 export default async function TriggerPage({
@@ -91,19 +106,23 @@ export default async function TriggerPage({
             <h1 className="text-2xl font-semibold tracking-tight">{definition.name} trigger</h1>
             <p className="mt-1 max-w-xl text-sm text-muted-foreground">
               {kind === "slack"
-                ? `What in Slack makes @${agent.handle} act. Each event needs the app to hold the matching permission.`
+                ? `What in Slack makes @${agent.handle} act. Its app is created with it; each event needs the app to hold the matching permission.`
                 : kind === "stripe"
-                  ? `Which Stripe events reach @${agent.handle}. They come from the Stripe account you connect here.`
+                  ? `Which Stripe events reach @${agent.handle}. They come from the Stripe account connected to this workspace, which every agent in it shares.`
                   : `What in Gmail wakes @${agent.handle}. Notifications come from the Google account connected under Access.`}
             </p>
           </div>
         </div>
-        {kind === "stripe" && trigger ? <DisconnectStripeButton agentId={agent.id} /> : null}
+        {kind === "slack" && trigger ? <StopSlackEventsButton agentId={agent.id} /> : null}
+        {kind === "stripe" && trigger ? <StopStripeEventsButton agentId={agent.id} /> : null}
         {kind === "gmail" && trigger ? <StopGmailWatchButton agentId={agent.id} /> : null}
       </div>
 
       {query.connected === "1" ? (
-        <Notice icon={CircleCheck}>Stripe account connected. Now pick the events to listen for.</Notice>
+        <Notice icon={CircleCheck}>
+          Stripe account connected to the workspace. Now pick the events @{agent.handle} should
+          listen for — other agents can pick theirs without connecting again.
+        </Notice>
       ) : null}
       {query.installed === "1" ? (
         <Notice icon={CircleCheck}>
@@ -274,25 +293,25 @@ async function SlackDetail({
   agent: Awaited<ReturnType<typeof getAgent>> & object;
   trigger: Trigger | null;
 }) {
-  if (!trigger) {
-    return (
-      <p className="mt-8 rounded-xl border border-dashed px-6 py-16 text-center text-sm text-muted-foreground">
-        This agent has no Slack trigger.
-      </p>
-    );
-  }
-
-  const missing = agent.slackInstalledAt ? missingScopes(trigger.events, agent.slackBotScopes) : [];
+  // The tools allowed under Access need scopes of their own; the install has
+  // to cover them along with the events, so the form shows both.
+  const [allowedTools, connection] = await Promise.all([
+    allowedSlackTools(agent.id),
+    getConnection(agent.id, "slack"),
+  ]);
+  const missing = agent.slackInstalledAt
+    ? missingScopes(trigger?.events ?? [], agent.slackBotScopes, allowedTools)
+    : [];
 
   return (
     <>
       {agent.slackInstalledAt ? null : (
         <section className="mt-8 rounded-2xl border border-violet-200/70 bg-gradient-to-br from-violet-50 via-fuchsia-50/60 to-rose-50/50 px-6 py-8 sm:px-8 dark:border-violet-900/50 dark:from-violet-950/40 dark:via-fuchsia-950/20 dark:to-rose-950/10">
-          <h2 className="text-lg font-semibold tracking-tight">Install @{agent.handle} to Slack first</h2>
+          <h2 className="text-lg font-semibold tracking-tight">@{agent.handle} isn&apos;t in Slack yet</h2>
           <p className="mt-1 max-w-lg text-sm text-muted-foreground">
-            Nothing reaches the agent until its app is in the workspace. Slack will ask you to
-            approve the app&apos;s permissions; afterwards you land back here to choose the
-            events.
+            Events reach the agent only once its app is installed in the workspace. You can
+            choose them first — the install then asks for exactly the permissions they need —
+            or install now and come back.
           </p>
           <div className="mt-5">
             <InstallSlackButton agentId={agent.id} accent returnTo="trigger" align="start" />
@@ -302,7 +321,9 @@ async function SlackDetail({
 
       <dl className="mt-8 grid gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-[1fr_2fr]">
         <Field label="Status">
-          {agent.slackInstalledAt ? (
+          {!trigger ? (
+            <Dot tone="amber">Not listening</Dot>
+          ) : agent.slackInstalledAt ? (
             missing.length > 0 ? (
               <Dot tone="amber">Reinstall needed</Dot>
             ) : (
@@ -311,12 +332,21 @@ async function SlackDetail({
           ) : (
             <Dot tone="amber">Not installed</Dot>
           )}
+          {!trigger ? (
+            <span className="mt-1 block text-xs text-muted-foreground">
+              Nothing in Slack wakes @{agent.handle} until events are chosen below.
+            </span>
+          ) : null}
         </Field>
         <Field label="Webhook">
-          <span className="font-mono text-xs break-all">{slackEventsUrl(trigger.id)}</span>
+          {trigger ? (
+            <span className="font-mono text-xs break-all">{slackEventsUrl(trigger.id)}</span>
+          ) : (
+            <span className="text-muted-foreground">Assigned when the events are saved.</span>
+          )}
         </Field>
         <Field label="Last event">
-          {trigger.lastEventAt ? (
+          {trigger?.lastEventAt ? (
             <>
               <code className="font-mono text-xs">{trigger.lastEventType}</code>{" "}
               <span className="text-muted-foreground">· {formatTime(trigger.lastEventAt)}</span>
@@ -343,15 +373,16 @@ async function SlackDetail({
 
       {missing.length > 0 ? (
         <Notice icon={CircleAlert}>
-          The events need permissions the install didn&apos;t grant ({missing.join(", ")}).
+          The events and tools need permissions the install didn&apos;t grant ({missing.join(", ")}).
           Reinstall the app from the agent&apos;s page so Slack asks for them.
         </Notice>
       ) : null}
 
       <h2 className="mt-10 text-lg font-semibold tracking-tight">Events</h2>
       <p className="mt-1 text-sm text-muted-foreground">
-        Slack sends these to the webhook. @{agent.handle} answers mentions and DMs; the rest
-        are received and, for now, only noted.
+        {trigger
+          ? `Slack sends these to the webhook. @${agent.handle} answers mentions and DMs; the rest are received and, for now, only noted.`
+          : `Pick what should wake @${agent.handle}. Saving subscribes its Slack app to these events; mentions and DMs get an answer, the rest are received and, for now, only noted.`}
       </p>
       <TriggerEventsForm
         agentId={agent.id}
@@ -362,10 +393,82 @@ async function SlackDetail({
           description,
           required,
         }))}
-        selected={trigger.events}
+        selected={trigger ? trigger.events : [...DEFAULT_SLACK_EVENTS]}
         granted={agent.slackBotScopes}
+        allowedTools={allowedTools}
       />
+
+      <SlackActions agent={agent} connection={connection} allowedTools={allowedTools} />
     </>
+  );
+}
+
+/**
+ * Being woken by Slack and acting in it are two grants, as with Stripe:
+ * events come from the app's subscription above, actions from this app's
+ * own Slack MCP server, connected like any server under Access — except
+ * that it needs no authorization of its own, since it speaks with the bot
+ * token the install granted. The same card, placed where the question comes
+ * up.
+ */
+async function SlackActions({
+  agent,
+  connection,
+  allowedTools,
+}: {
+  agent: Awaited<ReturnType<typeof getAgent>> & object;
+  connection: Awaited<ReturnType<typeof getConnection>>;
+  allowedTools: string[];
+}) {
+  const authorized = connection?.status === "authorized";
+  const tools = authorized ? await listTools(connection.id) : [];
+  const send = tools.find((tool) => tool.name === SLACK_SEND_TOOL);
+
+  return (
+    <section className="mt-10">
+      <h2 className="text-lg font-semibold tracking-tight">Actions</h2>
+      <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+        Events only wake @{agent.handle}; its answer in the thread needs no tool. To let it
+        do more in Slack — post to a channel, DM someone, read a channel or a thread, look
+        people up — connect its Slack tools, the same as any server under Access. They use
+        the app already installed, so there is nothing to authorize. Each tool is off until
+        you allow it, and a tool that needs a permission the install lacks means a
+        reinstall.
+      </p>
+
+      {authorized ? (
+        <Link
+          href={`/app/${agent.id}/access/slack`}
+          className="group mt-4 flex items-center justify-between gap-4 rounded-xl border border-emerald-300/70 bg-emerald-50/40 px-5 py-4 transition-all hover:-translate-y-0.5 hover:border-emerald-400/80 hover:shadow-sm dark:border-emerald-800/60 dark:bg-emerald-950/20"
+        >
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <Dot tone="emerald">Slack tools connected</Dot>
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {tools.length === 0
+                ? "No tools reported yet."
+                : `${allowedTools.length} of ${tools.length} tools allowed`}
+              {send
+                ? send.allowed
+                  ? send.requiresApproval
+                    ? " · may send messages, with approval"
+                    : " · may send messages without approval"
+                  : " · may not send messages yet"
+                : null}
+            </p>
+          </div>
+          <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-emerald-800 dark:text-emerald-300">
+            Manage tools
+            <ChevronRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
+          </span>
+        </Link>
+      ) : (
+        <div className="mt-4">
+          <ConnectSlackToolsButton agentId={agent.id} />
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -403,16 +506,20 @@ async function StripeDetail({
     );
   }
 
-  const connected = trigger?.status === "active" && trigger.accountId;
+  // The account is the workspace's, connected once by whichever agent's page
+  // the person happened to be on; this trigger is only @handle's event list.
+  const connection = await getStripeConnection(agent.workspaceId);
 
-  if (!connected) {
+  if (!isStripeConnected(connection)) {
     return (
       <section className="mt-8 rounded-2xl border border-indigo-200/70 bg-gradient-to-br from-indigo-50 via-sky-50/60 to-violet-50/50 px-6 py-8 sm:px-8 dark:border-indigo-900/50 dark:from-indigo-950/40 dark:via-sky-950/20 dark:to-violet-950/10">
         <h2 className="text-lg font-semibold tracking-tight">Connect a Stripe account</h2>
         <p className="mt-1 max-w-lg text-sm text-muted-foreground">
-          Stripe will ask you to pick the account and approve the app&apos;s permissions. After
-          that you choose which of its events @{agent.handle} should hear about.
-          {trigger?.status === "disconnected"
+          Stripe will ask you to pick the account and approve the app&apos;s permissions. The
+          account is connected to the whole workspace: after this one install, @{agent.handle}
+          and every other agent here choose which of its events to hear about, without going
+          to Stripe again.
+          {connection?.status === "disconnected"
             ? " The previous connection was revoked from Stripe's side."
             : null}
         </p>
@@ -423,26 +530,53 @@ async function StripeDetail({
     );
   }
 
-  const [endpoint, tools] = await Promise.all([getStripeEndpoint(), getConnection(agent.id, "stripe")]);
+  const [endpoint, tools, listeners] = await Promise.all([
+    getStripeEndpoint(),
+    getConnection(agent.id, "stripe"),
+    countStripeListeners(agent.workspaceId),
+  ]);
+  const events = trigger?.events ?? [];
 
   return (
     <>
       <dl className="mt-8 grid gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-[1fr_2fr]">
         <Field label="Status">
-          <Dot tone="emerald">Connected</Dot>
+          {events.length > 0 ? (
+            <Dot tone="emerald">Listening</Dot>
+          ) : (
+            <Dot tone="amber">Not listening</Dot>
+          )}
+          <span className="mt-1 block text-xs text-muted-foreground">
+            {events.length > 0
+              ? `Stripe events on the list below wake @${agent.handle}.`
+              : `The account is connected; pick events below to start.`}
+          </span>
         </Field>
         <Field label="Stripe account">
           <a
-            href={`https://dashboard.stripe.com/${trigger.accountId}`}
+            href={`https://dashboard.stripe.com/${connection.accountId}`}
             target="_blank"
             rel="noreferrer"
             className="font-mono text-xs underline-offset-4 hover:underline"
           >
-            {trigger.accountId}
+            {connection.accountId}
           </a>
+          {connection.livemode === false ? (
+            <span className="ml-2 text-xs text-muted-foreground">test mode</span>
+          ) : null}
+          <span className="mt-1 block text-xs text-muted-foreground">
+            Connected to the workspace
+            {connection.connectedAt ? ` on ${formatTime(connection.connectedAt)}` : ""}, shared by
+            every agent in it —{" "}
+            {listeners === 0
+              ? "none listening yet."
+              : listeners === 1
+                ? "one agent listening."
+                : `${listeners} agents listening.`}
+          </span>
         </Field>
         <Field label="Last event">
-          {trigger.lastEventAt ? (
+          {trigger?.lastEventAt ? (
             <>
               <code className="font-mono text-xs">{trigger.lastEventType}</code>{" "}
               <span className="text-muted-foreground">· {formatTime(trigger.lastEventAt)}</span>
@@ -461,15 +595,23 @@ async function StripeDetail({
         </Field>
       </dl>
 
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs text-muted-foreground">
+          Disconnecting removes the account from the whole workspace, not just from @
+          {agent.handle}. Stopping this agent alone is the button at the top.
+        </p>
+        <DisconnectStripeButton agentId={agent.id} listeners={listeners} />
+      </div>
+
       <h2 className="mt-10 text-lg font-semibold tracking-tight">Events</h2>
       <p className="mt-1 text-sm text-muted-foreground">
-        Stripe sends the connected account&apos;s events to one shared webhook; only the types
-        chosen here reach @{agent.handle}.
-        {trigger.events.length > 0 ? (
+        Stripe sends the account&apos;s events to one shared webhook; only the types chosen here
+        reach @{agent.handle}. Other agents keep their own lists.
+        {events.length > 0 ? (
           <>
             {" "}
             Listening for{" "}
-            {trigger.events.map((event) => (
+            {events.map((event) => (
               <Badge key={event} variant="outline" className="mr-1 font-mono text-[10px]">
                 {event}
               </Badge>
@@ -483,7 +625,7 @@ async function StripeDetail({
         agentId={agent.id}
         kind="stripe"
         options={STRIPE_EVENTS.map(({ id, name, description }) => ({ id, name, description }))}
-        selected={trigger.events}
+        selected={events}
       />
 
       <StripeActions agent={agent} connection={tools} />

@@ -49,6 +49,7 @@ export function TriggerEventsForm({
   options,
   selected,
   granted,
+  allowedTools = [],
 }: {
   agentId: string;
   kind: TriggerKind;
@@ -56,6 +57,8 @@ export function TriggerEventsForm({
   selected: string[];
   /** Slack: scopes the current install granted, to point out new ones. */
   granted?: string[] | null;
+  /** Slack: the tools allowed under Access, whose scopes the install needs as well. */
+  allowedTools?: string[];
 }) {
   const [state, formAction, pending] = useActionState<TriggerActionState, FormData>(
     SAVE_ACTIONS[kind],
@@ -75,7 +78,7 @@ export function TriggerEventsForm({
   const customTypes = custom.split(/[\s,]+/).filter(Boolean);
   const invalidCustom = customTypes.filter((type) => !isStripeEventType(type.toLowerCase()));
 
-  const scopes = kind === "slack" ? botScopesFor(chosen) : [];
+  const scopes = kind === "slack" ? botScopesFor(chosen, allowedTools) : [];
   const grantedSet = new Set(granted ?? []);
   const newScopes = granted ? scopes.filter((scope) => !grantedSet.has(scope)) : [];
 
@@ -163,6 +166,7 @@ export function TriggerEventsForm({
         <div className="mt-6 rounded-xl border bg-muted/30 px-4 py-3">
           <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
             Bot permissions these need
+            {allowedTools.length > 0 ? " (with the Slack tools allowed under Access)" : null}
           </p>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {scopes.map((scope) => (

@@ -1,7 +1,5 @@
 "use server";
 
-import { randomUUID } from "node:crypto";
-
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -11,7 +9,7 @@ import {
   HANDLE_MAX,
   INSTRUCTIONS_MAX,
 } from "@/lib/agent-limits";
-import { createAgent, deleteAgent, isHandleTaken } from "@/lib/agents";
+import { createAgent, isHandleTaken } from "@/lib/agents";
 import { isModelId } from "@/lib/models";
 import { SlackApiError } from "@/lib/slack";
 import {
@@ -20,8 +18,6 @@ import {
   saveConfigRefreshToken,
 } from "@/lib/slack-config-token";
 import { createSlackApp, deleteSlackApp } from "@/lib/slack-apps";
-import { DEFAULT_SLACK_EVENTS } from "@/lib/slack-events-catalog";
-import { createTrigger, slackEventsUrl } from "@/lib/triggers";
 
 export type CreateAgentField =
   | "configToken"
@@ -132,17 +128,15 @@ export async function createAgentAction(
     }
   }
 
-  // The Slack trigger's id is the path of the webhook, and the webhook goes
-  // into the app's manifest — so the id has to exist before either row does.
-  const triggerId = randomUUID();
-
+  // The app starts out subscribed to nothing and asking for the base scopes
+  // only. Events and tools are the person's choices, made on the agent's
+  // page; each one changes the manifest when it's made.
   let slackApp;
   try {
     slackApp = await createSlackApp(workspaceId, {
       handle,
       description: description || null,
-      eventsUrl: slackEventsUrl(triggerId),
-      events: DEFAULT_SLACK_EVENTS,
+      tools: [],
     });
   } catch (error) {
     // A token that died between the check above and here is a field problem,
@@ -169,17 +163,6 @@ export async function createAgentAction(
       model,
       slackApp,
     });
-    try {
-      await createTrigger({
-        id: triggerId,
-        agentId: agent.id,
-        kind: "slack",
-        events: DEFAULT_SLACK_EVENTS,
-      });
-    } catch (error) {
-      await deleteAgent(agent.id).catch(() => {});
-      throw error;
-    }
   } catch (error) {
     // The Slack app exists but nothing points at it any more. Clean it up so
     // the handle stays free and the workspace doesn't collect orphans.
@@ -213,8 +196,6 @@ function slackAppFailureMessage(error: unknown) {
     case "ratelimited":
       return "Slack is rate limiting app creation. Wait a minute and try again.";
     case "invalid_manifest":
-      // One reason Slack gives is that the events URL failed its challenge —
-      // which is what happens when the endpoint isn't deployed yet.
       return `Slack rejected the app manifest: ${describe(error.details)}`;
     case "invalid_auth":
     case "not_authed":

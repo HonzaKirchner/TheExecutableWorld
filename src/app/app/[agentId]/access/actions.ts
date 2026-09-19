@@ -16,6 +16,8 @@ import {
   type McpServerInfo,
 } from "@/lib/mcp/catalog";
 import { connectAndListTools } from "@/lib/mcp/client";
+import { landingAfterConnect } from "@/lib/mcp/landing";
+import { parseMcpReturnTo, type McpReturnTo } from "@/lib/mcp/return-to";
 import {
   deleteConnection,
   getConnection,
@@ -27,6 +29,9 @@ import {
 } from "@/lib/mcp/connections";
 import { suggestApproval } from "@/lib/mcp/tools";
 import { stopGmailWatch } from "@/lib/gmail/watch";
+import { SlackApiError } from "@/lib/slack";
+import { seedSlackConnection, SlackAccessError, syncSlackManifest } from "@/lib/slack-access";
+import { SlackConfigTokenError } from "@/lib/slack-config-token";
 import { parseInstallReturnTo, startSlackInstall } from "@/lib/slack-install";
 import { getTrigger } from "@/lib/triggers";
 
@@ -43,6 +48,13 @@ export type CustomServerState = {
  * was added before and is being connected again. Ends in one of two places:
  * on the server's authorization page if it wants the person to sign in, or
  * on the tool list if the stored tokens (or no auth at all) were enough.
+ * `returnTo` says where the person lands once authorized: the tool list by
+ * default, or the trigger's page when the connection was started from its
+ * card (see `landingAfterConnect`).
+ *
+ * Slack is the one server with nothing to authorize: the connection is
+ * seeded with the bot token the agent's Slack install granted, so it needs
+ * the app installed and nothing else.
  */
 export async function connectMcpServerAction(
   _previous: AccessActionState,
@@ -64,13 +76,23 @@ export async function connectMcpServerAction(
   }
   if (!server) return { error: "That server isn't supported." };
 
-  const connection = await upsertConnection({
-    agentId: agent.id,
-    serverId: server.id,
-    serverUrl: server.url,
-  });
+  let connection: McpConnection;
+  if (server.id === "slack") {
+    try {
+      connection = await seedSlackConnection(agent);
+    } catch (error) {
+      if (error instanceof SlackAccessError) return { error: error.message };
+      throw error;
+    }
+  } else {
+    connection = await upsertConnection({
+      agentId: agent.id,
+      serverId: server.id,
+      serverUrl: server.url,
+    });
+  }
 
-  const failure = await establish(agent, connection, server);
+  const failure = await establish(agent, connection, server, parseMcpReturnTo(formData.get("returnTo")));
   return failure ? { error: failure } : {};
 }
 
@@ -124,10 +146,15 @@ export async function connectCustomMcpServerAction(
  * couldn't be reached; otherwise it doesn't return at all, because both
  * outcomes end in a redirect.
  */
-async function establish(agent: Agent, connection: McpConnection, server: McpServerInfo) {
+async function establish(
+  agent: Agent,
+  connection: McpConnection,
+  server: McpServerInfo,
+  returnTo: McpReturnTo = "access",
+) {
   let result;
   try {
-    result = await connectAndListTools(connection);
+    result = await connectAndListTools(connection, { returnTo });
   } catch (error) {
     return connectionFailureMessage(server.name, error);
   }
@@ -138,7 +165,7 @@ async function establish(agent: Agent, connection: McpConnection, server: McpSer
 
   await syncTools(connection.id, result.tools, suggestApproval);
   revalidatePath(`/app/${agent.id}`);
-  redirect(`/app/${agent.id}/access/${server.id}`);
+  redirect(await landingAfterConnect(agent.id, server.id, returnTo));
 }
 
 /**
@@ -179,6 +206,16 @@ export async function disconnectMcpServerAction(
   }
 
   await deleteConnection(agent.id, serverId);
+
+  // The Slack tools' scopes leave the manifest with them. Best effort: the
+  // connection is gone either way, and a wider manifest does no harm until
+  // the next install.
+  if (serverId === "slack") {
+    await syncSlackManifest(agent, { tools: [] }).catch((error) =>
+      console.error(`Could not update the Slack manifest for agent ${agent.id}`, error),
+    );
+  }
+
   revalidatePath(`/app/${agent.id}`);
   redirect(`/app/${agent.id}`);
 }
@@ -186,6 +223,11 @@ export async function disconnectMcpServerAction(
 /**
  * Records which tools the agent may call and which of those need a human's
  * approval. Installing to Slack is a separate step on the agent's page.
+ *
+ * For the Slack server the allowed tools also decide the app's bot scopes,
+ * so the manifest at Slack is updated first — as for events — and the
+ * choice stored only once that has gone through. Scopes the current install
+ * lacks show up on the agent's page as a reinstall.
  */
 export async function saveToolAccessAction(
   _previous: AccessActionState,
@@ -205,6 +247,14 @@ export async function saveToolAccessAction(
   const known = new Set((await listTools(connection.id)).map((tool) => tool.name));
   const allowed = strings(formData.getAll("allowed")).filter((name) => known.has(name));
   const approval = strings(formData.getAll("approval")).filter((name) => known.has(name));
+
+  if (serverId === "slack") {
+    try {
+      await syncSlackManifest(agent, { tools: allowed });
+    } catch (error) {
+      return { error: slackManifestFailure(error) };
+    }
+  }
 
   await saveToolAccess(connection.id, allowed, approval);
   revalidatePath(`/app/${agent.id}`);
@@ -231,6 +281,14 @@ export async function installSlackAppAction(
     return { error: error instanceof Error ? error.message : "Could not start the install." };
   }
   redirect(url);
+}
+
+function slackManifestFailure(error: unknown) {
+  if (error instanceof SlackConfigTokenError) return error.message;
+  if (error instanceof SlackApiError) {
+    return `Slack rejected the app's new permissions (${error.code}). Nothing was saved.`;
+  }
+  return error instanceof Error ? error.message : "Slack could not be updated.";
 }
 
 function connectionFailureMessage(serverName: string, error: unknown) {

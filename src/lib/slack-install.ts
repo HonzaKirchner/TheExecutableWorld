@@ -3,9 +3,8 @@ import { randomBytes } from "node:crypto";
 import { getAgentSlackCredentials, setSlackInstallState, type Agent } from "@/lib/agents";
 import { baseUrl } from "@/lib/base-url";
 import { slackPost } from "@/lib/slack";
+import { requiredBotScopes } from "@/lib/slack-access";
 import { SLACK_INSTALL_REDIRECT_PATH } from "@/lib/slack-apps";
-import { botScopesFor, DEFAULT_SLACK_EVENTS } from "@/lib/slack-events-catalog";
-import { getTrigger } from "@/lib/triggers";
 
 /**
  * The URL that installs an agent's Slack app. `team` pre-selects the agent's
@@ -60,7 +59,8 @@ function isReturnTo(value: unknown): value is InstallReturnTo {
 /**
  * Records a fresh install `state` on the agent and returns the URL to send
  * the person to. The scopes asked for have to match the manifest's, which
- * follow from the events the agent's Slack trigger listens for.
+ * follow from the events the agent's Slack trigger listens for and the
+ * Slack tools it may call.
  */
 export async function startSlackInstall(agent: Agent, returnTo: InstallReturnTo) {
   const credentials = await getAgentSlackCredentials(agent.id);
@@ -68,8 +68,7 @@ export async function startSlackInstall(agent: Agent, returnTo: InstallReturnTo)
     throw new Error("This agent has no Slack app to install.");
   }
 
-  const trigger = await getTrigger(agent.id, "slack");
-  const scopes = botScopesFor(trigger?.events ?? DEFAULT_SLACK_EVENTS);
+  const scopes = await requiredBotScopes(agent);
 
   const state = newInstallState(returnTo);
   await setSlackInstallState(agent.id, state);

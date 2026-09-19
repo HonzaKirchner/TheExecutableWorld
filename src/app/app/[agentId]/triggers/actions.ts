@@ -10,7 +10,7 @@ import { GoogleAuthError, isGmailTriggerConfigured } from "@/lib/gmail/google";
 import { GmailWatchError, startGmailWatch, stopGmailWatch } from "@/lib/gmail/watch";
 import { DEFAULT_GMAIL_EVENTS, normalizeGmailEvents } from "@/lib/gmail-events";
 import { SlackApiError } from "@/lib/slack";
-import { updateSlackApp } from "@/lib/slack-apps";
+import { syncSlackManifest } from "@/lib/slack-access";
 import { SlackConfigTokenError } from "@/lib/slack-config-token";
 import { normalizeSlackEvents } from "@/lib/slack-events-catalog";
 import {
@@ -20,25 +20,61 @@ import {
   isStripeConfigured,
   newStripeState,
 } from "@/lib/stripe";
+import {
+  countOtherStripeConnections,
+  deleteStripeConnection,
+  getStripeConnection,
+  isStripeConnected,
+  startStripeConnection,
+} from "@/lib/stripe-connections";
 import { normalizeStripeEvents } from "@/lib/stripe-events";
 import { syncStripeEndpoint } from "@/lib/stripe-webhook";
 import {
   createTrigger,
   deleteTrigger,
   getTrigger,
-  setTriggerOAuthState,
-  slackEventsUrl,
   updateTriggerEvents,
 } from "@/lib/triggers";
 
 export type TriggerActionState = { error?: string };
 
 /**
- * Changes which Slack events the agent's app subscribes to. The manifest is
- * updated at Slack first; only if that goes through is the choice stored, so
- * the two can't disagree. New scopes take effect on the next install.
+ * Chooses which Slack events wake the agent; the first save is what creates
+ * its Slack trigger. The manifest at Slack is updated before the choice is
+ * stored, so the two can't disagree — except that a brand-new trigger has to
+ * be inserted first, because its id is the webhook's path and Slack
+ * challenges that URL as soon as it sees it. If Slack then refuses, the row
+ * goes again. New scopes take effect on the next install.
  */
 export async function saveSlackEventsAction(
+  _previous: TriggerActionState,
+  formData: FormData,
+): Promise<TriggerActionState> {
+  const agent = await requireAgent(formData);
+  if ("error" in agent) return agent;
+
+  const events = normalizeSlackEvents(strings(formData.getAll("events")));
+
+  const existing = await getTrigger(agent.id, "slack");
+  const trigger = existing ?? (await createTrigger({ agentId: agent.id, kind: "slack", events }));
+
+  try {
+    await syncSlackManifest(agent, { trigger: { id: trigger.id, events } });
+  } catch (error) {
+    if (!existing) await deleteTrigger(trigger.id).catch(() => {});
+    return { error: slackFailure(error) };
+  }
+
+  if (existing) await updateTriggerEvents(trigger.id, events);
+  revalidatePath(`/app/${agent.id}`);
+  redirect(`/app/${agent.id}`);
+}
+
+/**
+ * The agent stops listening to Slack: the subscription leaves the manifest
+ * and the trigger goes. The app stays installed, and its tools keep working.
+ */
+export async function stopSlackEventsAction(
   _previous: TriggerActionState,
   formData: FormData,
 ): Promise<TriggerActionState> {
@@ -48,27 +84,23 @@ export async function saveSlackEventsAction(
   const trigger = await getTrigger(agent.id, "slack");
   if (!trigger) return { error: "This agent has no Slack trigger." };
 
-  const events = normalizeSlackEvents(strings(formData.getAll("events")));
-
-  if (agent.slackAppId) {
-    try {
-      await updateSlackApp(agent.workspaceId, agent.slackAppId, {
-        handle: agent.handle,
-        description: agent.description,
-        eventsUrl: slackEventsUrl(trigger.id),
-        events,
-      });
-    } catch (error) {
-      return { error: slackFailure(error) };
-    }
+  try {
+    await syncSlackManifest(agent, { trigger: null });
+  } catch (error) {
+    return { error: slackFailure(error) };
   }
 
-  await updateTriggerEvents(trigger.id, events);
+  await deleteTrigger(trigger.id);
   revalidatePath(`/app/${agent.id}`);
   redirect(`/app/${agent.id}`);
 }
 
-/** Sends the person to Stripe to connect an account to this agent. */
+/**
+ * Sends the person to Stripe to connect an account to the agent's workspace.
+ * The install is the workspace's: it happens once, and afterwards every agent
+ * in it picks events without going to Stripe again. Started from an agent's
+ * page so the callback can bring the person back to it.
+ */
 export async function connectStripeAction(
   _previous: TriggerActionState,
   formData: FormData,
@@ -80,19 +112,16 @@ export async function connectStripeAction(
     return { error: "Stripe isn't configured: set STRIPE_SECRET_KEY and STRIPE_INSTALL_LINK." };
   }
 
-  const trigger =
-    (await getTrigger(agent.id, "stripe")) ??
-    (await createTrigger({ agentId: agent.id, kind: "stripe", events: [], status: "pending" }));
-
   const state = newStripeState();
-  await setTriggerOAuthState(trigger.id, state);
+  await startStripeConnection({ workspaceId: agent.workspaceId, agentId: agent.id, state });
   redirect(buildStripeConnectUrl({ state }));
 }
 
 /**
- * Records which Stripe events reach this agent. The shared endpoint takes
- * everything; this list is the filter the events route applies. Catalog picks
- * and typed-in event types arrive in different fields and are merged here.
+ * Records which Stripe events reach this agent; the first save is what
+ * creates its trigger. The shared endpoint takes everything, so this list is
+ * the filter the events route applies. Catalog picks and typed-in event
+ * types arrive in different fields and are merged here.
  */
 export async function saveStripeEventsAction(
   _previous: TriggerActionState,
@@ -101,8 +130,8 @@ export async function saveStripeEventsAction(
   const agent = await requireAgent(formData);
   if ("error" in agent) return agent;
 
-  const trigger = await getTrigger(agent.id, "stripe");
-  if (!trigger?.accountId || trigger.status !== "active") {
+  const connection = await getStripeConnection(agent.workspaceId);
+  if (!isStripeConnected(connection)) {
     return { error: "Connect a Stripe account before choosing its events." };
   }
 
@@ -110,7 +139,10 @@ export async function saveStripeEventsAction(
   const events = normalizeStripeEvents([...strings(formData.getAll("events")), ...typed]);
   if (events.length === 0) return { error: "Pick at least one event." };
 
-  await updateTriggerEvents(trigger.id, events);
+  const trigger = await getTrigger(agent.id, "stripe");
+  if (trigger) await updateTriggerEvents(trigger.id, events);
+  else await createTrigger({ agentId: agent.id, kind: "stripe", events });
+
   try {
     await syncStripeEndpoint();
   } catch (error) {
@@ -121,8 +153,8 @@ export async function saveStripeEventsAction(
   redirect(`/app/${agent.id}`);
 }
 
-/** Removes the trigger and tells Stripe the platform no longer wants the account. */
-export async function disconnectStripeAction(
+/** This agent stops listening to Stripe. The workspace's account stays connected for the others. */
+export async function stopStripeEventsAction(
   _previous: TriggerActionState,
   formData: FormData,
 ): Promise<TriggerActionState> {
@@ -132,33 +164,49 @@ export async function disconnectStripeAction(
   const trigger = await getTrigger(agent.id, "stripe");
   if (!trigger) return { error: "This agent has no Stripe trigger." };
 
-  await deauthorizeIfUnused(trigger.accountId, agent);
   await deleteTrigger(trigger.id);
+  revalidatePath(`/app/${agent.id}`);
+  redirect(`/app/${agent.id}`);
+}
+
+/**
+ * Disconnects the Stripe account from the whole workspace and tells Stripe
+ * the platform no longer wants it. Every agent's event list stays where it
+ * is, inert, so connecting again (the same account or another) picks up
+ * where things left off.
+ */
+export async function disconnectStripeAction(
+  _previous: TriggerActionState,
+  formData: FormData,
+): Promise<TriggerActionState> {
+  const agent = await requireAgent(formData);
+  if ("error" in agent) return agent;
+
+  const connection = await getStripeConnection(agent.workspaceId);
+  if (!connection) return { error: "This workspace has no Stripe connection." };
+
+  if (connection.accountId) await deauthorizeIfUnused(connection.accountId, agent);
+  await deleteStripeConnection(agent.workspaceId);
 
   revalidatePath(`/app/${agent.id}`);
   redirect(`/app/${agent.id}`);
 }
 
 /**
- * Another agent may listen to the same account; only the last one to leave
- * revokes the platform's access.
+ * The same account may be connected to another workspace; only the last one
+ * to leave revokes the platform's access.
  */
-async function deauthorizeIfUnused(accountId: string | null, agent: Agent) {
-  if (!accountId || !isStripeConfigured()) return;
-  const { db } = await import("@/lib/db");
-  const rows = (await db()`
-    select count(*)::int as n from triggers
-    where kind = 'stripe' and account_id = ${accountId} and agent_id <> ${agent.id}
-  `) as { n: number }[];
-  if ((rows[0]?.n ?? 0) > 0) return;
+async function deauthorizeIfUnused(accountId: string, agent: Agent) {
+  if (!isStripeConfigured()) return;
+  if ((await countOtherStripeConnections(accountId, agent.workspaceId)) > 0) return;
 
   try {
     await deauthorizeStripeAccount(accountId);
   } catch (error) {
     // Already disconnected on Stripe's side is fine; anything else is logged
-    // and the trigger goes anyway — the person asked for it to.
+    // and the connection goes anyway — the person asked for it to.
     if (!(error instanceof StripeApiError && error.code === "invalid_client")) {
-      console.error(`Could not deauthorize Stripe account for agent ${agent.id}`, error);
+      console.error(`Could not deauthorize Stripe account for workspace ${agent.workspaceId}`, error);
     }
   }
 }
