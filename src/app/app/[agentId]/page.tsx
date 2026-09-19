@@ -6,12 +6,14 @@ import { auth } from "@/auth";
 import { getAgent } from "@/lib/agents";
 import { listConnections } from "@/lib/mcp/connections";
 import { allowedSlackTools } from "@/lib/slack-access";
+import { listAgentSessions } from "@/lib/sessions";
 import { missingScopes } from "@/lib/slack-events-catalog";
 import { getStripeConnection } from "@/lib/stripe-connections";
 import { listTriggers } from "@/lib/triggers";
 import { AccessSection } from "@/components/access/access-section";
 import { InstallSlackPanel } from "@/components/access/install-slack-panel";
 import { FlashToast } from "@/components/flash-toast";
+import { SessionsSection } from "@/components/sessions/sessions-section";
 import { TriggersSection } from "@/components/triggers-section";
 import { Badge } from "@/components/ui/badge";
 
@@ -45,11 +47,12 @@ export default async function AgentDetailPage({
 
   if (!agent) notFound();
 
-  const [connections, triggers, stripeConnection, slackTools] = await Promise.all([
+  const [connections, triggers, stripeConnection, slackTools, sessions] = await Promise.all([
     listConnections(agent.id),
     listTriggers(agent.id),
     getStripeConnection(agent.workspaceId),
     allowedSlackTools(agent.id),
+    listAgentSessions(agent.id),
   ]);
   const installed = query.installed === "1";
   const slackTrigger = triggers.find((trigger) => trigger.kind === "slack");
@@ -143,6 +146,8 @@ export default async function AgentDetailPage({
         )}
         stripeConnection={stripeConnection}
       />
+
+      <SessionsSection sessions={sessions} />
 
       <AccessSection agent={agent} connections={connections} />
 

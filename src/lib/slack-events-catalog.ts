@@ -12,7 +12,7 @@ export type SlackEventDefinition = {
   name: string;
   description: string;
   scopes: readonly string[];
-  /** Always on: it's how anyone talks to the agent in a channel. */
+  /** Always on: the agent can't do its job without it, so it isn't a choice. */
   required?: boolean;
 };
 
@@ -29,24 +29,29 @@ export const SLACK_EVENTS: readonly SlackEventDefinition[] = [
     name: "Direct message",
     description: "Someone sends the agent a DM.",
     scopes: ["im:history"],
+    required: true,
   },
   {
     id: "message.channels",
     name: "Public channel message",
-    description: "Any message in a public channel the agent has been added to.",
+    description:
+      "Every message in a public channel the agent is in. Needed to follow a thread someone started by calling on the agent; which of these it acts on is decided in code, not by subscribing to fewer of them.",
     scopes: ["channels:history"],
+    required: true,
   },
   {
     id: "message.groups",
     name: "Private channel message",
-    description: "Any message in a private channel the agent has been added to.",
+    description: "Every message in a private channel the agent is in, for the same reason.",
     scopes: ["groups:history"],
+    required: true,
   },
   {
     id: "message.mpim",
     name: "Group DM message",
-    description: "Any message in a group DM the agent is part of.",
+    description: "Every message in a group DM the agent is part of, for the same reason.",
     scopes: ["mpim:history"],
+    required: true,
   },
   {
     id: "reaction_added",
@@ -75,14 +80,26 @@ export const SLACK_EVENTS: readonly SlackEventDefinition[] = [
 export const DEFAULT_SLACK_EVENTS: readonly string[] = ["app_mention", "message.im"];
 
 /**
- * Needed regardless of events and tools: posting replies, opening DMs, and
- * looking up who is talking.
+ * Needed regardless of events and tools: posting replies, opening DMs, looking
+ * up who is talking, and reading the thread the agent was spoken to in.
+ *
+ * The four history scopes are the last of those. `conversations.replies` wants
+ * the one matching the conversation's type, and an agent can be @mentioned in
+ * any of them — so answering in context needs all four, whatever the agent
+ * subscribes to. They used to arrive only with the matching `message.*` event,
+ * which meant an agent that just listened for mentions could never read the
+ * thread it was mentioned in. Slack has no narrower scope for "this one
+ * thread": reading a thread means being allowed to read the conversation.
  */
 export const BASE_BOT_SCOPES: readonly string[] = [
   "chat:write",
   "im:write",
   "im:read",
   "users:read",
+  "channels:history",
+  "groups:history",
+  "im:history",
+  "mpim:history",
 ];
 
 export function getSlackEvent(id: string) {
@@ -104,10 +121,16 @@ export function normalizeSlackEvents(ids: Iterable<string>): string[] {
  * The bot scopes a manifest (and an install) needs: the base set, what the
  * events need, and what the Slack tools the agent may call need
  * (src/lib/slack-tools-catalog.ts).
+ *
+ * Events are normalised first, so a trigger whose stored events predate an
+ * event becoming required still accounts for it — the manifest subscribes to
+ * the required ones either way, and asking for fewer scopes than that would
+ * break them. (An agent with no trigger gets the required events' scopes
+ * too; asking for a scope early never breaks an install.)
  */
 export function botScopesFor(eventIds: Iterable<string>, toolNames: Iterable<string> = []): string[] {
   const scopes = new Set(BASE_BOT_SCOPES);
-  for (const id of eventIds) {
+  for (const id of normalizeSlackEvents(eventIds)) {
     for (const scope of getSlackEvent(id)?.scopes ?? []) scopes.add(scope);
   }
   for (const scope of slackToolScopes(toolNames)) scopes.add(scope);

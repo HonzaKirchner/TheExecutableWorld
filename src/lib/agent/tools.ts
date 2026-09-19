@@ -19,9 +19,14 @@ function qualify(serverId: string, toolName: string) {
   return `${serverId}${SEPARATOR}${toolName}`;
 }
 
+/** Enough about a tool to name it to a person, without the argument schema. */
+export type ToolLabel = { serverName: string; toolName: string; title?: string };
+
 export type AgentTools = {
   /** What to hand `generateText`. Empty when the agent has no tools. */
   toolSet: ToolSet;
+  /** How to describe a tool call, keyed by the qualified name the model sees. */
+  labels: Record<string, ToolLabel>;
   /**
    * Tools the agent is allowed to use but that a person has to approve first.
    * There is nowhere to ask yet, so they are withheld and named in the prompt
@@ -36,6 +41,7 @@ export type AgentTools = {
 
 const NO_TOOLS: AgentTools = {
   toolSet: {},
+  labels: {},
   withheld: [],
   unreachable: [],
   close: async () => {},
@@ -58,6 +64,7 @@ export async function loadAgentTools(agentId: string): Promise<AgentTools> {
 
   const sessions: McpSession[] = [];
   const toolSet: ToolSet = {};
+  const labels: AgentTools["labels"] = {};
   const withheld: AgentTools["withheld"] = [];
   const unreachable: AgentTools["unreachable"] = [];
 
@@ -94,7 +101,9 @@ export async function loadAgentTools(agentId: string): Promise<AgentTools> {
             continue;
           }
 
-          toolSet[qualify(connection.serverId, tool.name)] = dynamicTool({
+          const qualified = qualify(connection.serverId, tool.name);
+          labels[qualified] = { serverName, toolName: tool.name, title: tool.title };
+          toolSet[qualified] = dynamicTool({
             description: toolDescription(serverName, tool.title, tool.description),
             inputSchema: jsonSchema(tool.inputSchema ?? EMPTY_SCHEMA),
             // Identifies where the tool came from without telling the model.
@@ -112,7 +121,7 @@ export async function loadAgentTools(agentId: string): Promise<AgentTools> {
     throw error;
   }
 
-  return { toolSet, withheld, unreachable, close };
+  return { toolSet, labels, withheld, unreachable, close };
 }
 
 /** For a server that declares no arguments — MCP allows it, providers don't. */

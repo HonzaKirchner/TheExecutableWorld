@@ -3,8 +3,9 @@ import { randomBytes } from "node:crypto";
 import { getAgentSlackCredentials, setSlackInstallState, type Agent } from "@/lib/agents";
 import { baseUrl } from "@/lib/base-url";
 import { slackPost } from "@/lib/slack";
-import { requiredBotScopes } from "@/lib/slack-access";
-import { SLACK_INSTALL_REDIRECT_PATH } from "@/lib/slack-apps";
+import { manifestInputFor } from "@/lib/slack-access";
+import { SLACK_INSTALL_REDIRECT_PATH, updateSlackApp } from "@/lib/slack-apps";
+import { botScopesFor } from "@/lib/slack-events-catalog";
 
 /**
  * The URL that installs an agent's Slack app. `team` pre-selects the agent's
@@ -68,7 +69,21 @@ export async function startSlackInstall(agent: Agent, returnTo: InstallReturnTo)
     throw new Error("This agent has no Slack app to install.");
   }
 
-  const scopes = await requiredBotScopes(agent);
+  // What the install has to ask for follows from the trigger's events and the
+  // Slack tools the agent may call, both of which the manifest carries.
+  const input = await manifestInputFor(agent);
+  const scopes = botScopesFor(input.subscription?.events ?? [], input.tools);
+
+  // Slack grants only what the app's own configuration lists, and that was
+  // written when the app was created — so an app made before a scope was added
+  // to the catalog would send the person all the way to Slack just to be told
+  // the scope is invalid. Pushing the manifest first makes installing (or
+  // reinstalling) the cure for any drift between the app and what this code
+  // now asks for, which is exactly what the "needs new permissions" panel
+  // tells people to do.
+  if (agent.slackAppId) {
+    await updateSlackApp(agent.workspaceId, agent.slackAppId, input);
+  }
 
   const state = newInstallState(returnTo);
   await setSlackInstallState(agent.id, state);
