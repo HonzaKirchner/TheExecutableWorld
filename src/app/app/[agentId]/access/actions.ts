@@ -27,9 +27,10 @@ import {
 } from "@/lib/mcp/connections";
 import { suggestApproval } from "@/lib/mcp/tools";
 import { stopGmailWatch } from "@/lib/gmail/watch";
+import { updateSlackApp } from "@/lib/slack-apps";
 import { botScopesFor, DEFAULT_SLACK_EVENTS } from "@/lib/slack-events-catalog";
 import { buildInstallUrl, newInstallState } from "@/lib/slack-install";
-import { getTrigger } from "@/lib/triggers";
+import { getTrigger, slackEventsUrl } from "@/lib/triggers";
 
 export type AccessActionState = { error?: string };
 
@@ -238,7 +239,23 @@ async function beginSlackInstall(agent: Agent) {
   // The scopes asked for have to match the manifest's, which follow from the
   // events the agent's Slack trigger listens for.
   const trigger = await getTrigger(agent.id, "slack");
-  const scopes = botScopesFor(trigger?.events ?? DEFAULT_SLACK_EVENTS);
+  const events = trigger?.events ?? DEFAULT_SLACK_EVENTS;
+  const scopes = botScopesFor(events);
+
+  // Slack grants only what the app's own configuration lists, and that was
+  // written when the app was created — so an app made before a scope was added
+  // to the catalog would send the person all the way to Slack just to be told
+  // the scope is invalid. Pushing the manifest first makes reinstalling the
+  // cure for any drift between the app and what this code now asks for, which
+  // is exactly what the "needs new permissions" panel tells people to do.
+  if (agent.slackAppId && trigger) {
+    await updateSlackApp(agent.workspaceId, agent.slackAppId, {
+      handle: agent.handle,
+      description: agent.description,
+      eventsUrl: slackEventsUrl(trigger.id),
+      events,
+    });
+  }
 
   const state = newInstallState();
   await setSlackInstallState(agent.id, state);

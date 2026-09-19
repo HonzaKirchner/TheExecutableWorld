@@ -99,10 +99,10 @@ export function isHumanMessage(event: SlackMessageEvent) {
  * rather than treating every message as the first thing it has ever heard.
  *
  * Best effort on purpose: `conversations.replies` needs the history scope for
- * the channel's type, and an agent only subscribed to `app_mention` was never
- * granted `channels:history`. Rather than track which of the four scopes
- * applies, ask and accept "no" — the caller falls back to the one message
- * Slack delivered, which is enough to answer with.
+ * the channel's type. Every agent now asks for all four at install (see
+ * `BASE_BOT_SCOPES`), but an app installed before that did not — so rather
+ * than track which of the four applies, ask and accept "no". The caller falls
+ * back to the one message Slack delivered, which is enough to answer with.
  */
 export async function fetchThread(input: {
   botToken: string;

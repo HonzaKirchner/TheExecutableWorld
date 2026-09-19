@@ -70,14 +70,26 @@ export const SLACK_EVENTS: readonly SlackEventDefinition[] = [
 export const DEFAULT_SLACK_EVENTS: readonly string[] = ["app_mention", "message.im"];
 
 /**
- * Needed regardless of events: posting replies, opening DMs, and looking up
- * who is talking.
+ * Needed regardless of events: posting replies, opening DMs, looking up who is
+ * talking, and reading the thread the agent was spoken to in.
+ *
+ * The four history scopes are the last of those. `conversations.replies` wants
+ * the one matching the conversation's type, and an agent can be @mentioned in
+ * any of them — so answering in context needs all four, whatever the agent
+ * subscribes to. They used to arrive only with the matching `message.*` event,
+ * which meant an agent that just listened for mentions could never read the
+ * thread it was mentioned in. Slack has no narrower scope for "this one
+ * thread": reading a thread means being allowed to read the conversation.
  */
 export const BASE_BOT_SCOPES: readonly string[] = [
   "chat:write",
   "im:write",
   "im:read",
   "users:read",
+  "channels:history",
+  "groups:history",
+  "im:history",
+  "mpim:history",
 ];
 
 export function getSlackEvent(id: string) {
