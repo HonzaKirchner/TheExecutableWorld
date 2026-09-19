@@ -10,6 +10,7 @@ import {
   updateApprovalMessage,
   type ToolApprovalRow,
 } from "@/lib/agent/approvals";
+import { resumeGmailRun, stopGmailRun } from "@/lib/agent/gmail";
 import { resumeSlackRun, stopSlackRun } from "@/lib/agent/slack";
 import { resumeStripeRun, stopStripeRun } from "@/lib/agent/stripe";
 import { debugScope } from "@/lib/log";
@@ -220,6 +221,8 @@ async function decide(
   if (readiness.outcome === "stopped") {
     if (triggerKind === "stripe") {
       await stopStripeRun(approval.sessionId, readiness.stoppedBy, readiness.note);
+    } else if (triggerKind === "gmail") {
+      await stopGmailRun(approval.sessionId, readiness.stoppedBy, readiness.note);
     } else {
       await stopSlackRun(approval.sessionId, readiness.stoppedBy, readiness.note);
     }
@@ -228,6 +231,8 @@ async function decide(
 
   if (triggerKind === "stripe") {
     await resumeStripeRun(approval.sessionId, readiness.decisions);
+  } else if (triggerKind === "gmail") {
+    await resumeGmailRun(approval.sessionId, readiness.decisions);
   } else {
     await resumeSlackRun(approval.sessionId, readiness.decisions);
   }

@@ -11,6 +11,7 @@ import {
 import { bearerFromConnection, GoogleAuthError, gmailPubSubTopic } from "@/lib/gmail/google";
 import { getGmailEvent, gmailLabelIdsFor, normalizeGmailEvents } from "@/lib/gmail-events";
 import { ensureGmailConnection } from "@/lib/gmail/connection";
+import { handleGmailEvent } from "@/lib/agent/gmail";
 import { getConnection } from "@/lib/mcp/connections";
 import {
   countOtherGmailTriggers,
@@ -195,12 +196,10 @@ async function processForTrigger(trigger: Trigger, notification: GmailNotificati
   const occurrences = eventsIn(records, trigger.events);
   for (const { eventId, messageId } of occurrences.slice(0, MESSAGES_PER_NOTIFICATION)) {
     await recordTriggerEvent(trigger.id, eventId).catch(() => {});
-    // Received and, for now, only noted — like the other triggers.
     const message = await getMessage(bearer, messageId, "metadata").catch(() => null);
     const summary = message ? summarizeMessage(message, false) : null;
-    console.log(
-      `Gmail ${eventId} for trigger ${trigger.id}: ${summary?.subject ?? messageId}` +
-        (summary?.from ? ` from ${summary.from}` : ""),
+    await handleGmailEvent(trigger, eventId, summary).catch((error) =>
+      console.error(`Agent run for Gmail ${eventId} on trigger ${trigger.id} failed`, error),
     );
   }
 

@@ -19,12 +19,26 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
+  const sha = process.env.COMMIT_SHA;
+
   return (
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {children}
+        {sha && (
+          <a
+            href={`https://github.com/HonzaKirchner/TheExecutableWorld/commit/${sha}`}
+            target="_blank"
+            rel="noreferrer"
+            className="fixed bottom-1 left-1 z-50 font-mono text-[10px] text-muted-foreground/50 hover:text-muted-foreground"
+          >
+            {sha.slice(0, 7)}
+          </a>
+        )}
+      </body>
     </html>
   );
 }
