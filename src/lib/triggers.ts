@@ -360,6 +360,8 @@ export type SlackTriggerContext = {
   slackAppId: string | null;
   signingSecret: string | null;
   botToken: string | null;
+  /** So a run can tell the agent's own messages from a person's. */
+  botUserId: string | null;
 };
 
 export async function getSlackTriggerContext(
@@ -371,7 +373,8 @@ export async function getSlackTriggerContext(
   if (!UUID_RE.test(triggerId)) return null;
 
   const rows = (await sql`
-    select t.id as trigger_id, a.id, a.handle, a.slack_app_id, a.slack_signing_secret, a.slack_bot_token
+    select t.id as trigger_id, a.id, a.handle, a.slack_app_id, a.slack_signing_secret,
+           a.slack_bot_token, a.slack_bot_user_id
     from triggers t
     join agents a on a.id = t.agent_id
     where t.id = ${triggerId} and t.kind = 'slack'
@@ -383,6 +386,7 @@ export async function getSlackTriggerContext(
     slack_app_id: string | null;
     slack_signing_secret: string | null;
     slack_bot_token: string | null;
+    slack_bot_user_id: string | null;
   }[];
 
   const row = rows[0];
@@ -394,6 +398,7 @@ export async function getSlackTriggerContext(
     slackAppId: row.slack_app_id,
     signingSecret: decryptOptional(row.slack_signing_secret),
     botToken: decryptOptional(row.slack_bot_token),
+    botUserId: row.slack_bot_user_id,
   };
 }
 

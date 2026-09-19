@@ -68,6 +68,40 @@ export function isHumanMessage(event: SlackMessageEvent) {
   return event.type === "message" && event.channel_type === "im";
 }
 
+/**
+ * The messages in a thread, oldest first, so the agent can answer in context
+ * rather than treating every message as the first thing it has ever heard.
+ *
+ * Best effort on purpose: `conversations.replies` needs the history scope for
+ * the channel's type, and an agent only subscribed to `app_mention` was never
+ * granted `channels:history`. Rather than track which of the four scopes
+ * applies, ask and accept "no" — the caller falls back to the one message
+ * Slack delivered, which is enough to answer with.
+ */
+export async function fetchThread(input: {
+  botToken: string;
+  channel: string;
+  threadTs: string;
+  limit?: number;
+}): Promise<SlackMessageEvent[] | null> {
+  try {
+    const response = await slackPost<{ ok: boolean; messages?: SlackMessageEvent[] }>(
+      "conversations.replies",
+      {
+        token: input.botToken,
+        form: {
+          channel: input.channel,
+          ts: input.threadTs,
+          limit: String(input.limit ?? 50),
+        },
+      },
+    );
+    return response.messages ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function replyInThread(input: {
   botToken: string;
   channel: string;

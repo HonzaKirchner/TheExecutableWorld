@@ -4,6 +4,7 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import type { JSONSchema7 } from "ai";
 
 import { decryptOptional, encryptOptional } from "@/lib/crypto";
 import { db, ensureSchema } from "@/lib/db";
@@ -55,6 +56,12 @@ export type DiscoveredTool = {
   title?: string;
   description?: string;
   annotations?: ToolAnnotations;
+  /**
+   * JSON Schema for the tool's arguments. Not stored — a run lists tools from
+   * the server anyway, and a cached schema that has drifted from the server's
+   * is worse than no cache.
+   */
+  inputSchema?: JSONSchema7;
 };
 
 export type McpCredentials = {

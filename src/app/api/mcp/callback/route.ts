@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { revalidatePath } from "next/cache";
 
 import { auth } from "@/auth";
+import { baseUrl } from "@/lib/base-url";
 import { connectAndListTools, finishAuthorization } from "@/lib/mcp/client";
 import { getConnectionByState, syncTools } from "@/lib/mcp/connections";
 import { suggestApproval } from "@/lib/mcp/tools";
@@ -31,7 +32,7 @@ export async function GET(request: NextRequest) {
 
   if (params.get("error") || !code) {
     // Declined, or the server had a problem. Either way nothing was granted.
-    return redirectTo(request, back, {
+    return redirectTo(back, {
       error: params.get("error") === "access_denied" ? "mcp_denied" : "mcp_failed",
     });
   }
@@ -45,15 +46,15 @@ export async function GET(request: NextRequest) {
     await syncTools(connection.id, result.tools, suggestApproval);
   } catch (error) {
     console.error(`MCP authorization for ${connection.serverId} failed`, error);
-    return redirectTo(request, back, { error: "mcp_failed" });
+    return redirectTo(back, { error: "mcp_failed" });
   }
 
   revalidatePath(back);
-  return redirectTo(request, `${back}/access/${connection.serverId}`);
+  return redirectTo(`${back}/access/${connection.serverId}`);
 }
 
-function redirectTo(request: NextRequest, path: string, query?: Record<string, string>) {
-  const url = new URL(path, request.nextUrl.origin);
+function redirectTo(path: string, query?: Record<string, string>) {
+  const url = new URL(path, baseUrl());
   for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
   return Response.redirect(url, 303);
 }
