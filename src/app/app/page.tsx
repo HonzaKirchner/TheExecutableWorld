@@ -3,13 +3,20 @@ import { Bot } from "lucide-react";
 
 import { auth } from "@/auth";
 import { listAgents } from "@/lib/agents";
+import { hasConfigToken } from "@/lib/slack-config-token";
 import { NewAgentDialog } from "@/components/new-agent-dialog";
 import { Badge } from "@/components/ui/badge";
 
 export default async function AgentsPage() {
   const session = await auth();
   const workspaceId = session?.slack?.teamId;
-  const agents = workspaceId ? await listAgents(workspaceId) : [];
+  const [agents, configured] = workspaceId
+    ? await Promise.all([listAgents(workspaceId), hasConfigToken(workspaceId)])
+    : [[], false];
+
+  // Without a token of its own a workspace can't create Slack apps at all, so
+  // the dialog asks for one before anything else.
+  const needsConfigToken = Boolean(workspaceId) && !configured;
 
   return (
     <div className="animate-in fade-in slide-in-from-bottom-1 duration-500">
@@ -20,7 +27,7 @@ export default async function AgentsPage() {
             The AI coworkers you&apos;ve created.
           </p>
         </div>
-        <NewAgentDialog />
+        <NewAgentDialog needsConfigToken={needsConfigToken} />
       </div>
 
       {agents.length === 0 ? (
@@ -33,7 +40,7 @@ export default async function AgentsPage() {
             Create your first AI coworker to get started.
           </p>
           <div className="mt-6">
-            <NewAgentDialog />
+            <NewAgentDialog needsConfigToken={needsConfigToken} />
           </div>
         </div>
       ) : (

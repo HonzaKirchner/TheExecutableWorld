@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { revalidatePath } from "next/cache";
 
 import { auth } from "@/auth";
+import { baseUrl } from "@/lib/base-url";
 import { exchangeStripeCode } from "@/lib/stripe";
 import { syncStripeEndpoint } from "@/lib/stripe-webhook";
 import { getTriggerByOAuthState, markStripeConnected } from "@/lib/triggers";
@@ -29,7 +30,7 @@ export async function GET(request: NextRequest) {
   }
 
   if (params.get("error") || !code) {
-    return redirectTo(request, back, {
+    return redirectTo(back, {
       error: params.get("error") === "access_denied" ? "stripe_denied" : "stripe_failed",
     });
   }
@@ -39,7 +40,7 @@ export async function GET(request: NextRequest) {
     account = await exchangeStripeCode(code);
   } catch (error) {
     console.error(`Stripe connection for agent ${trigger.agentId} failed`, error);
-    return redirectTo(request, back, { error: "stripe_failed" });
+    return redirectTo(back, { error: "stripe_failed" });
   }
 
   await markStripeConnected(trigger.id, account.accountId);
@@ -49,11 +50,11 @@ export async function GET(request: NextRequest) {
     console.error("Could not register the Stripe webhook endpoint", error),
   );
   revalidatePath(`/app/${trigger.agentId}`);
-  return redirectTo(request, back, { connected: "1" });
+  return redirectTo(back, { connected: "1" });
 }
 
-function redirectTo(request: NextRequest, path: string, query?: Record<string, string>) {
-  const url = new URL(path, request.nextUrl.origin);
+function redirectTo(path: string, query?: Record<string, string>) {
+  const url = new URL(path, baseUrl());
   for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
   return Response.redirect(url, 303);
 }

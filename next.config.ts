@@ -11,6 +11,7 @@ const nextConfig: NextConfig = {
       { protocol: "https", hostname: "secure.gravatar.com" },
     ],
   },
+  allowedDevOrigins: ["test.mvolfik.com"],
 };
 
 export default nextConfig;

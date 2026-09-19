@@ -140,6 +140,28 @@ export async function getAgent(
   return rows[0] ? toAgent(rows[0]) : null;
 }
 
+/**
+ * An agent by id alone, without a workspace to scope it.
+ *
+ * Only for webhook handlers: they have no session, and the request has
+ * already been tied to this one agent — by the signature of its own Slack
+ * app, or by the Stripe account its trigger is connected to. Anything with a
+ * session must go through `getAgent(workspaceId, agentId)` instead.
+ */
+export async function getAgentById(agentId: string): Promise<Agent | null> {
+  await ensureSchema();
+  const sql = db();
+
+  if (!isUuid(agentId)) return null;
+
+  const rows = (await sql.query(
+    `select ${AGENT_COLUMNS} from agents where id = $1 limit 1`,
+    [agentId],
+  )) as AgentRow[];
+
+  return rows[0] ? toAgent(rows[0]) : null;
+}
+
 export async function createAgent(input: {
   workspaceId: string;
   handle: string;

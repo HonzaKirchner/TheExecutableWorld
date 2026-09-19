@@ -1,18 +1,25 @@
-import type { NextRequest } from "next/server";
+import { after, type NextRequest } from "next/server";
 
+import { answerSlackMessage } from "@/lib/agent/slack";
 import {
   isHumanMessage,
-  replyInThread,
   verifySlackSignature,
   type SlackEventEnvelope,
 } from "@/lib/slack-events";
 import { getSlackTriggerContext, recordTriggerEvent } from "@/lib/triggers";
 
 /**
+ * The agent's run has to fit in here, and a run that calls a few tools takes
+ * far longer than a page render. Vercel caps this by plan, so a deployment
+ * that allows less will cut a long run short.
+ */
+export const maxDuration = 300;
+
+/**
  * Slack's Events API calls this for one agent — the trigger id in the path
  * says which. Slack expects a 200 within three seconds and retries otherwise,
- * so the work here is kept to: check the signature, answer the challenge,
- * reply in the thread.
+ * so the request itself does nothing but check the signature and accept the
+ * event; the agent runs in `after`, once Slack has its 200.
  */
 export async function POST(
   request: NextRequest,
@@ -84,18 +91,13 @@ export async function POST(
     return new Response(null, { status: 200 });
   }
 
-  try {
-    await replyInThread({
-      botToken: context.botToken,
-      channel: event.channel,
-      ts: event.ts,
-      threadTs: event.thread_ts,
-      text: `Hi, I'm @${context.agentHandle}. I heard you — answering properly is my next lesson.`,
-    });
-  } catch (error) {
-    // Still 200: Slack would otherwise retry, and the failure is ours to fix.
-    console.error(`Agent ${context.agentId} failed to reply`, error);
-  }
+  // Answer once Slack has its 200. `answerSlackMessage` handles its own
+  // failures — it has to, because by now nothing it does can change the
+  // response, and the person in the thread is the only one who'd notice.
+  const botToken = context.botToken;
+  const channel = event.channel;
+  const ts = event.ts;
+  after(() => answerSlackMessage({ ...context, botToken }, { ...event, channel, ts }));
 
   return new Response(null, { status: 200 });
 }

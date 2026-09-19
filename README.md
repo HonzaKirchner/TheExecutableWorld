@@ -32,7 +32,6 @@ Everything under `/app` is gated by [src/proxy.ts](src/proxy.ts); signed-out vis
    | `SLACK_CLIENT_SECRET`  | Slack app → Basic Information → Client Secret   | yes      |
    | `SLACK_SIGNING_SECRET` | Slack app → Basic Information → Signing Secret  | not yet  |
    | `SLACK_APP_ID`         | Slack app → Basic Information → App ID          | not yet  |
-   | `SLACK_CONFIG_ACCESS_TOKEN` / `SLACK_CONFIG_REFRESH_TOKEN` | api.slack.com/apps → Your App Configuration Tokens — the pair as generated; see [App configuration tokens](#app-configuration-tokens) | to create agents |
    | `APP_BASE_URL`         | Origin for OAuth redirect URLs (see below)      | optional |
    | `PUBLIC_BASE_URL`      | Internet-reachable origin for Slack event delivery; defaults to the Vercel production URL | locally, to create agents |
    | `DB_CONNECTION_STRING` | Neon → connection string                        | yes      |
@@ -40,6 +39,7 @@ Everything under `/app` is gated by [src/proxy.ts](src/proxy.ts); signed-out vis
    | `STRIPE_SECRET_KEY`    | The Stripe App developer account's secret key (same mode as the install link) | for Stripe triggers |
    | `STRIPE_INSTALL_LINK`  | An install link copied from the Stripe App's External test tab (test mode), used verbatim | for Stripe triggers |
    | `STRIPE_CLIENT_ID`     | Only as a fallback for a published app without `STRIPE_INSTALL_LINK` | optional |
+   | `OPENAI_API_KEY`       | platform.openai.com → API keys — without it agents can't answer | to run agents |
    | `GITHUB_MCP_CLIENT_ID` / `GITHUB_MCP_CLIENT_SECRET` | A GitHub App (or OAuth App) with `<base URL>/api/mcp/callback` as its callback URL. GitHub's MCP server doesn't register clients dynamically, so without these the GitHub card can't connect | for GitHub access |
    | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | A Google Cloud OAuth client (web application) in a project with the Gmail API enabled, with `<base URL>/api/mcp/callback` among its redirect URIs | for Gmail access and triggers |
    | `GMAIL_PUBSUB_TOPIC` | A Pub/Sub topic, `projects/<project>/topics/<topic>`, that `gmail-api-push@system.gserviceaccount.com` may publish to | for Gmail triggers |
@@ -149,6 +149,7 @@ Seven tables, created by [src/lib/db.ts](src/lib/db.ts):
 | `mcp_tools`           | (connection, tool name)   | The server's tools as last listed, with `allowed` and `requires_approval` |
 | `triggers`            | `uuid`, unique per (agent, kind) | What makes an agent act: `config.events`, `status`, and for Stripe the connected `account_id` and the last event seen |
 | `stripe_webhook_endpoint` | `'default'`           | The platform's one Connect webhook endpoint at Stripe, with its signing secret |
+| `slack_config_tokens` | Slack team id             | That workspace's current app configuration token pair — the workspace its agents' Slack apps are created in |
 
 ### Secrets are encrypted
 
@@ -210,9 +211,11 @@ the agent follows and are shown first on its page. Submitting the dialog runs
    so the form and the action agree;
 3. rejects a handle already used in the workspace *before* calling Slack, because app
    creation is rate limited and an orphaned app has to be cleaned up by hand;
-4. creates a Slack app from a manifest via `apps.manifest.create` — with event
+4. stores the workspace's app configuration token if the dialog asked for one (below) —
+   after the other fields are known good, because saving it spends it;
+5. creates a Slack app from a manifest via `apps.manifest.create` — with event
    subscriptions pointing at the agent's webhook (below);
-5. stores the agent and its Slack trigger with the credentials Slack hands back, and
+6. stores the agent and its Slack trigger with the credentials Slack hands back, and
    redirects to its page.
 
 If the insert fails after the app exists, the app is deleted again so the workspace
@@ -221,26 +224,33 @@ doesn't collect orphans.
 ### App configuration tokens
 
 `apps.manifest.create` doesn't authenticate with a bot or user token, and you can't get
-its token through OAuth. Generate a pair by hand under **Your App Configuration Tokens**
-at [api.slack.com/apps](https://api.slack.com/apps) and put both halves in the
-environment:
+its token through OAuth. Someone generates the pair by hand under **Your App
+Configuration Tokens** at [api.slack.com/apps](https://api.slack.com/apps).
 
-```ini
-SLACK_CONFIG_ACCESS_TOKEN=xoxe.xoxp-1-...   # good for 12 hours
-SLACK_CONFIG_REFRESH_TOKEN=xoxe-1-...       # swaps for a fresh pair
-```
+**The pair decides which workspace the app is created in.** `apps.manifest.create` takes
+no team parameter, so an app is born wherever its configuration token came from. A single
+shared pair would create every customer's agents in whichever workspace generated it —
+undistributed, and so impossible for that customer to install. So the pair is stored per
+workspace in `slack_config_tokens` (one row per Slack team id), and there is no
+environment fallback.
 
-Nothing is stored in the database. [src/lib/slack-config-token.ts](src/lib/slack-config-token.ts)
-uses the access token from the environment until Slack rejects it, then rotates with the
-refresh token and keeps the new pair in memory for the life of the process. Slack
-invalidates a refresh token the moment it is used, so after the first rotation the
-environment holds a dead one: a new process (a cold start, a redeploy, a restarted
-`next dev`) gets by on the access token while that is still valid, and once it isn't,
-creating or deleting an agent fails with a message saying so. The fix is always the
-same — generate a new pair at api.slack.com/apps and update both variables.
+A workspace with no pair can't create agents. The "New agent" dialog notices and asks for
+a refresh token before the rest of the form; `/app` passes `needsConfigToken` to
+[src/components/new-agent-dialog.tsx](src/components/new-agent-dialog.tsx). Whoever pastes
+it must have generated it while signed in to *that* workspace — nothing here can check
+that, but a token from elsewhere puts the apps in the wrong place again.
 
-The pair belongs to the workspace it was generated in, which is also the workspace new
-apps are created in.
+The token is rotated the moment it's pasted: that both proves it is real and is
+unavoidable anyway, since the first rotation is what yields an access token and
+invalidates what was pasted. From there
+[src/lib/slack-config-token.ts](src/lib/slack-config-token.ts) keeps it alive — the access
+token lasts 12 hours, and every rotation invalidates the refresh token it came from, so
+the current pair is written back. A rotation Slack rejects means the pair is dead: the row
+is deleted, and the dialog asks for a new one the next time round. `SlackConfigTokenError`
+carries that as a message the forms show directly.
+
+There is no way to replace a workspace's pair while it still rotates — that would want a
+settings page, which doesn't exist yet.
 
 ## Triggers
 
@@ -433,6 +443,65 @@ The flow, in [triggers/actions.ts](src/app/app/[agentId]/triggers/actions.ts) an
    Disconnecting the Gmail server under Access stops the trigger first, while the tokens
    still work.
 
+## Running an agent
+
+A trigger answers its webhook first and runs the agent afterwards, in
+[`after`](https://nextjs.org/docs/app/api-reference/functions/after): Slack wants a 200
+within three seconds and Stripe retries for days, while a run that calls a couple of
+tools takes far longer than either allows. Both routes set `maxDuration = 300`, which is
+the ceiling the run has to fit inside — Vercel caps it by plan, so a smaller plan cuts a
+long run short.
+
+The harness is [src/lib/agent/run.ts](src/lib/agent/run.ts), and it is deliberately dull:
+resolve the model, load the tools, hand both to the AI SDK's `generateText` with
+`stopWhen: stepCountIs(12)`, close the MCP sessions. It knows nothing about Slack or
+Stripe and writes nowhere — a trigger builds the messages, calls it, and decides what to
+do with the answer.
+
+### Models and providers
+
+An agent stores a model id (`agents.model`). [src/lib/models.ts](src/lib/models.ts) says
+which ids exist and which provider each belongs to;
+[src/lib/agent/providers.ts](src/lib/agent/providers.ts) builds a registry over the
+providers whose API key is set and resolves the id to a model. Adding a provider is three
+steps — install its `@ai-sdk/*` package, add the entry to `PROVIDERS` and its models to
+`MODELS`, add the factory — and nothing outside those two files knows a provider exists.
+A model whose key is missing fails the run with a message that names the variable, rather
+than quietly answering as a different model.
+
+### Tools
+
+The agent's tools are the MCP tools it has been allowed. At the start of a run,
+[src/lib/agent/tools.ts](src/lib/agent/tools.ts) opens a session per authorized
+connection and lists what the server offers now, then keeps the tools whose `mcp_tools`
+row says `allowed`. The split is on purpose: the database holds the person's decisions,
+the server holds the argument schemas, and a cached schema that has drifted from the
+server's is worse than no cache.
+
+Names are qualified as `serverId__toolName`, because MCP tool names are unique per server
+and not across them. Tools marked `requires_approval` are **withheld** — there is nowhere
+to ask a person yet — and named in the system prompt as unavailable, so the agent says it
+can't do the thing instead of pretending it did. A server that can't be reached is
+reported the same way and doesn't fail the run.
+
+### Slack
+
+[src/lib/agent/slack.ts](src/lib/agent/slack.ts) reads the thread with
+`conversations.replies` so the agent answers in context, and falls back to the single
+delivered message when that call is refused — an agent subscribed only to `app_mention`
+was never granted `channels:history`, and asking is cheaper than tracking which of the
+four history scopes applies. The agent's own messages become assistant turns, everyone
+else's are prefixed with their `<@U…>` so a multi-person thread stays legible. The reply
+goes into the thread, and *something* always goes into the thread: a run that fails says
+so, because silence is indistinguishable from being ignored.
+
+### Stripe
+
+[src/lib/agent/stripe.ts](src/lib/agent/stripe.ts) runs the agent on the event, with the
+event object in the message. There is nowhere to reply — no thread, no person waiting —
+so the run is the point and whatever the agent says at the end only reaches the logs.
+Giving an agent somewhere to report is a setting that doesn't exist yet.
+
 ## Giving an agent access
 
 The **Access** section on an agent's page lists the MCP servers in
@@ -510,10 +579,10 @@ cancellations as a passing toast. Nothing from the URL is rendered as-is.
 
 ## Deploying to Vercel
 
-Set `AUTH_SECRET`, `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `DB_CONNECTION_STRING`,
-`SLACK_CONFIG_ACCESS_TOKEN` and `SLACK_CONFIG_REFRESH_TOKEN` as project environment
-variables. `AUTH_URL` is detected
-automatically. Add the production callback URL
+Set `AUTH_SECRET`, `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `DB_CONNECTION_STRING` and
+`ENCRYPTION_KEY` as project environment variables. `AUTH_URL` is detected
+automatically. App configuration tokens are *not* environment variables — each workspace
+pastes its own through the app (above). Add the production callback URL
 (`https://<your-domain>/api/auth/callback/slack`) to the Slack app.
 
 [vercel.json](vercel.json) pins the framework preset to `nextjs`. This matters when the
@@ -542,22 +611,30 @@ src/
     api/mcp/callback/           MCP OAuth callback
     api/slack/install/callback/ Slack install callback
     api/slack/events/[triggerId]/ Slack Events API webhook
+    api/stripe/events/          Stripe Connect webhook
   lib/
     db.ts                       Neon client + schema
     base-url.ts                 Origin for redirect URLs
     agents.ts                   Workspace and agent queries
     models.ts                   The models an agent can run on
     slack.ts                    Slack Web API wrapper
-    slack-config-token.ts       App configuration token (env + in-memory rotation)
+    slack-config-token.ts       App configuration token pair per workspace, rotated
     slack-apps.ts               App manifest (scopes, events) -> apps.manifest.create
     slack-install.ts            Install URL + oauth.v2.access
     slack-events.ts             Signature check, event shapes, reply
     triggers.ts                 Trigger catalog + queries
+    agent/
+      run.ts                    The harness: one model call loop, trigger-agnostic
+      providers.ts              Model id -> provider client (the only @ai-sdk/* import)
+      prompt.ts                 System prompt assembly
+      tools.ts                  MCP tools -> AI SDK tool set, gated by the DB
+      slack.ts                  Slack trigger -> run -> reply in thread
+      stripe.ts                 Stripe trigger -> run
     mcp/
       catalog.ts                The MCP servers agents can connect to
       connections.ts            Connection + tool queries
       oauth-provider.ts         SDK OAuthClientProvider backed by the database
-      client.ts                 Connect, list tools, finish authorization
+      client.ts                 Connect, list tools, finish authorization, run sessions
       tools.ts                  Approval suggestion from tool annotations
   components/
     access/                     Access section, connect card, tool form, install panel

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --port 3003 --experimental-https",
+    "dev": "next dev --port 3003",
     "build": "next build",
     "start": "next start --port 3003",
     "lint": "eslint",
@@ -11,8 +11,10 @@
     "db:init": "node scripts/db-init.mts"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^4.0.70",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@neondatabase/serverless": "^1.1.0",
+    "ai": "^7.0.106",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.3.0",
     "lucide-react": "^1.47.0",

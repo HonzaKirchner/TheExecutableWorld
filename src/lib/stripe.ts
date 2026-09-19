@@ -196,6 +196,8 @@ export type StripeEvent = {
   account?: string;
   livemode: boolean;
   created: number;
+  /** The charge, subscription, invoice … the event is about. */
+  data?: { object?: unknown };
 };
 
 /*

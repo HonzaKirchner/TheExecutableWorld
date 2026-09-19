@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { revalidatePath } from "next/cache";
 
 import { auth } from "@/auth";
+import { baseUrl } from "@/lib/base-url";
 import {
   getAgentByInstallState,
   getAgentSlackCredentials,
@@ -32,14 +33,14 @@ export async function GET(request: NextRequest) {
   }
 
   if (params.get("error") || !code) {
-    return redirectTo(request, back, {
+    return redirectTo(back, {
       error: params.get("error") === "access_denied" ? "slack_denied" : "slack_failed",
     });
   }
 
   const credentials = await getAgentSlackCredentials(agent.id);
   if (!credentials) {
-    return redirectTo(request, back, { error: "slack_failed" });
+    return redirectTo(back, { error: "slack_failed" });
   }
 
   let installation;
@@ -47,7 +48,7 @@ export async function GET(request: NextRequest) {
     installation = await exchangeInstallCode({ ...credentials, code });
   } catch (error) {
     console.error(`Slack install of agent ${agent.id} failed`, error);
-    return redirectTo(request, back, { error: "slack_failed" });
+    return redirectTo(back, { error: "slack_failed" });
   }
 
   // `team` on the authorize URL only pre-selects a workspace; Slack lets the
@@ -55,17 +56,17 @@ export async function GET(request: NextRequest) {
   // token for anywhere else.
   if (installation.teamId !== agent.workspaceId) {
     await revokeInstallation(installation.botToken).catch(() => {});
-    return redirectTo(request, back, { error: "slack_wrong_workspace" });
+    return redirectTo(back, { error: "slack_wrong_workspace" });
   }
 
   await markSlackInstalled(agent.id, installation);
   revalidatePath(back);
   revalidatePath("/app");
-  return redirectTo(request, back, { installed: "1" });
+  return redirectTo(back, { installed: "1" });
 }
 
-function redirectTo(request: NextRequest, path: string, query?: Record<string, string>) {
-  const url = new URL(path, request.nextUrl.origin);
+function redirectTo(path: string, query?: Record<string, string>) {
+  const url = new URL(path, baseUrl());
   for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
   return Response.redirect(url, 303);
 }

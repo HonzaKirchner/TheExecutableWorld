@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { auth, UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { serverOAuthOptions } from "@/lib/mcp/catalog";
 import type { DiscoveredTool, McpConnection } from "@/lib/mcp/connections";
@@ -64,6 +65,49 @@ export async function finishAuthorization(
   }
 }
 
+/**
+ * A connection held open for the length of an agent run, so the tools it
+ * offers can be listed once and then called as many times as the run needs.
+ *
+ * `connectAndListTools` above is the configure-time counterpart: it connects,
+ * looks, and hangs up. Callers here must `close()`, which is why `runAgent`
+ * opens sessions in a `try`/`finally`.
+ */
+export type McpSession = {
+  serverId: string;
+  listTools: () => Promise<DiscoveredTool[]>;
+  callTool: (name: string, args: unknown) => Promise<CallToolResult>;
+  close: () => Promise<void>;
+};
+
+/**
+ * Opens a session on an already-authorized connection. Unlike the configure
+ * time path this never redirects: a run has no person in front of it, so an
+ * expired authorization that the SDK cannot refresh is simply an error.
+ */
+export async function openMcpSession(
+  connection: Pick<McpConnection, "id" | "serverId" | "serverUrl">,
+): Promise<McpSession> {
+  const provider = new DbOAuthClientProvider(connection.id);
+  const client = new Client(CLIENT_INFO);
+  const transport = new StreamableHTTPClientTransport(new URL(connection.serverUrl), {
+    authProvider: provider,
+  });
+
+  await client.connect(transport);
+
+  return {
+    serverId: connection.serverId,
+    listTools: () => listAllTools(client),
+    callTool: (name, args) =>
+      client.callTool({
+        name,
+        arguments: (args ?? {}) as Record<string, unknown>,
+      }) as Promise<CallToolResult>,
+    close: () => client.close().catch(() => {}),
+  };
+}
+
 async function listAllTools(client: Client): Promise<DiscoveredTool[]> {
   const tools: DiscoveredTool[] = [];
   let cursor: string | undefined;
@@ -77,6 +121,7 @@ async function listAllTools(client: Client): Promise<DiscoveredTool[]> {
         title: tool.title ?? tool.annotations?.title,
         description: tool.description,
         annotations: tool.annotations,
+        inputSchema: tool.inputSchema,
       });
     }
     cursor = page.nextCursor;

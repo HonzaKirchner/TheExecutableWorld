@@ -1,7 +1,10 @@
 /**
  * The origin this app is reachable at — what goes into OAuth redirect URLs,
  * both the ones Slack sends people back to after installing an agent and the
- * one MCP servers send them back to after authorizing.
+ * one MCP servers send them back to after authorizing, and what the callback
+ * routes and the /app gate build their own redirects from. Behind a reverse
+ * proxy the request's own host is the proxy's upstream (localhost), so it is
+ * no use for either.
  *
  * AUTH_URL is already the canonical origin in local development; on Vercel it
  * isn't set (Auth.js infers the origin per request) so fall back to the

@@ -276,4 +276,66 @@ async function createSchema() {
       select 1 from triggers t where t.agent_id = a.id and t.kind = 'slack'
     )
   `;
+
+  // App configuration tokens expire after 12 hours and each rotation
+  // invalidates the previous refresh token, so the current pair has to be
+  // persisted rather than kept in memory or in the environment.
+  //
+  // One row per workspace: `apps.manifest.create` has no team parameter, so an
+  // app is born in whatever workspace its configuration token came from. A
+  // single shared pair would create every workspace's agents in ours.
+  //
+  // Databases from before that go through a rename. Their one `'default'` row
+  // held the platform owner's pair and belongs to no workspace we can name
+  // here, so it goes; that workspace pastes its own pair like everyone else.
+  await sql`
+    do $$
+    begin
+      if to_regclass('public.slack_config_tokens') is not null
+         and exists (
+           select 1
+           from information_schema.columns
+           where table_schema = 'public'
+             and table_name = 'slack_config_tokens'
+             and column_name = 'id'
+         )
+      then
+        delete from slack_config_tokens where id = 'default';
+        alter table slack_config_tokens rename column id to workspace_id;
+      end if;
+    end
+    $$
+  `;
+
+  await sql`
+    create table if not exists slack_config_tokens (
+      workspace_id  text primary key references workspaces (id) on delete cascade,
+      access_token  text not null,
+      refresh_token text not null,
+      expires_at    timestamptz not null,
+      updated_at    timestamptz not null default now()
+    )
+  `;
+
+  // The foreign key came with the rename; a renamed table doesn't have it yet.
+  // Orphans have to go first, or adding it fails.
+  await sql`
+    delete from slack_config_tokens
+    where workspace_id not in (select id from workspaces)
+  `;
+  await sql`
+    do $$
+    begin
+      if not exists (
+        select 1 from pg_constraint
+        where conrelid = 'slack_config_tokens'::regclass
+          and contype = 'f'
+      ) then
+        alter table slack_config_tokens
+          add constraint slack_config_tokens_workspace_id_fkey
+          foreign key (workspace_id) references workspaces (id) on delete cascade;
+      end if;
+    end
+    $$
+  `;
 }
