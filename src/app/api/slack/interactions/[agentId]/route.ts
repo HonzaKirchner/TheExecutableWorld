@@ -237,7 +237,10 @@ function resolutionText(
   approval: ToolApprovalRow,
   decision: { outcome: "approved" | "declined" | "stopped"; userId: string; userName: string | null; note: string | null },
 ) {
-  const who = decision.userName ? `@${decision.userName}` : `<@${decision.userId}>`;
+  // Always Slack's own mention syntax, which renders as a real, clickable tag
+  // — a literal `@username` is never linked, whatever we type. `userName` is
+  // used elsewhere (the reason handed back to the model), but never here.
+  const who = `<@${decision.userId}>`;
   const label = `\`${approval.serverName}: ${approval.toolName}\``;
   if (decision.outcome === "approved") return `✅ ${label} approved by ${who}.`;
   if (decision.outcome === "stopped") return `⏹️ ${label} — agent stopped by ${who}.`;

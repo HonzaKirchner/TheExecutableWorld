@@ -197,6 +197,12 @@ async function execute(input: {
       "none",
   });
 
+  // Jev's verdict on a gated call is known here, in `toolApproval` — well
+  // before `onToolExecutionStart` fires for it — so it's stashed by call id
+  // and picked back up there, to show up right on the tool call itself
+  // rather than as a separate note once the whole run is done.
+  const autoApprovedBy = new Map<string, string>();
+
   try {
     const result = await generateText({
       model,
@@ -219,6 +225,9 @@ async function execute(input: {
           toolName: gate.toolName,
           args: toolCall.input,
         });
+        if (verdict.decision === "auto_approve") {
+          autoApprovedBy.set(toolCall.toolCallId, "Jev");
+        }
         return verdict.decision === "auto_approve"
           ? { type: "approved", reason: verdict.reason }
           : { type: "user-approval", reason: verdict.reason };
@@ -232,9 +241,10 @@ async function execute(input: {
           callId,
           label: labelFor(tools.labels, toolCall.toolName),
         });
+        const approvedBy = autoApprovedBy.get(toolCall.toolCallId);
         notify(input.onEvent, {
           type: "tool_call",
-          body: toolCall.toolName,
+          body: approvedBy ? `${toolCall.toolName} (auto-approved by ${approvedBy})` : toolCall.toolName,
           data: { arguments: safeJson(toolCall.input) },
         });
       },
@@ -273,8 +283,6 @@ async function execute(input: {
         });
       },
     });
-
-    reportAutomaticApprovals(result.steps, tools.labels, input.onEvent);
 
     const pending = pendingApprovals(result.steps, tools.labels);
     if (pending.length > 0) {
@@ -370,35 +378,6 @@ function pendingApprovals(
 }
 
 /**
- * A classifier's `auto_approve` doesn't pause the run, but it's still worth a
- * line in the transcript — otherwise a gated tool that "just ran" reads no
- * differently from one that never needed approval at all.
- */
-function reportAutomaticApprovals(
-  steps: readonly { content: readonly { type: string }[] }[],
-  labels: Record<string, ToolLabel>,
-  onEvent: RunCallbacks["onEvent"],
-) {
-  if (!onEvent) return;
-  for (const step of steps) {
-    for (const raw of step.content) {
-      const part = raw as {
-        type: string;
-        isAutomatic?: boolean;
-        reason?: string;
-        toolCall?: { toolName: string };
-      };
-      if (part.type !== "tool-approval-request" || !part.isAutomatic || !part.toolCall) continue;
-      notify(onEvent, {
-        type: "note",
-        body: `Auto-approved: ${labelFor(labels, part.toolCall.toolName)}`,
-        data: { tool: part.toolCall.toolName, reason: part.reason ?? null },
-      });
-    }
-  }
-}
-
-/**
  * Hands one event to a caller's sink, if it gave one. A sink is someone
  * else's write path (a live progress view, a session's transcript) — a throw
  * from it is their bug, not a reason to lose the model's tool call.
@@ -418,11 +397,22 @@ function notify<E>(onEvent: ((event: E) => void) | undefined, event: E) {
  * length budget of its own to protect it.
  */
 function safeJson(value: unknown): unknown {
+  let json: string;
   try {
-    return JSON.parse(preview(JSON.stringify(value) ?? "null", 500));
+    json = JSON.stringify(value) ?? "null";
   } catch {
+    // Circular references and the like — nothing to serialise, but at least
+    // say what kind of thing it was rather than showing nothing.
     return preview(String(value), 500);
   }
+  // Short enough to keep whole — the common case, and the only one where
+  // reparsing gives back a real object instead of a truncated, unparsable
+  // fragment of one.
+  if (json.length <= 500) return JSON.parse(json);
+  // Too long to keep as an object: shown as the truncated JSON text itself,
+  // not `String(value)`, which for anything but a primitive is just
+  // "[object Object]" and throws away everything worth seeing.
+  return preview(json, 500);
 }
 
 /**

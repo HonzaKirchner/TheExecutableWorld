@@ -228,6 +228,8 @@ export async function replyInThread(input: {
   threadTs?: string;
   text: string;
   blocks?: SlackBlock[];
+  /** `false` suppresses Slack's link-preview cards — used for messages whose only link is a transcript or approval link, never for the agent's own answers. */
+  unfurlLinks?: boolean;
 }): Promise<string | undefined> {
   log("posting reply", {
     channel: input.channel,
@@ -242,6 +244,7 @@ export async function replyInThread(input: {
       thread_ts: input.threadTs ?? input.ts,
       text: input.text,
       blocks: input.blocks,
+      ...(input.unfurlLinks === false ? { unfurl_links: false, unfurl_media: false } : {}),
     },
   });
   log("reply posted", { channel: input.channel, ts: response.ts });
@@ -258,10 +261,18 @@ export async function updateReply(input: {
   ts: string;
   text: string;
   blocks?: SlackBlock[];
+  /** See `replyInThread` — must match what the message was originally posted with. */
+  unfurlLinks?: boolean;
 }) {
   await slackPost("chat.update", {
     token: input.botToken,
-    json: { channel: input.channel, ts: input.ts, text: input.text, blocks: input.blocks },
+    json: {
+      channel: input.channel,
+      ts: input.ts,
+      text: input.text,
+      blocks: input.blocks,
+      ...(input.unfurlLinks === false ? { unfurl_links: false, unfurl_media: false } : {}),
+    },
   });
 }
 

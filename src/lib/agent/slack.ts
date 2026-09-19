@@ -2,7 +2,7 @@ import type { ModelMessage } from "ai";
 
 import { getAgentBotToken, getAgentById } from "@/lib/agents";
 import { deletePause, getPause, requestApprovals } from "@/lib/agent/approvals";
-import { buildProgressBlocks, createProgressTracker, renderProgress } from "@/lib/agent/progress";
+import { buildListBlocks, createProgressTracker, renderProgress } from "@/lib/agent/progress";
 import { isSilence, type TriggerContext } from "@/lib/agent/prompt";
 import { continueAgentRun, describeRunFailure, runAgent, type ApprovalDecision, type RunOutcome } from "@/lib/agent/run";
 import { debugScope, preview } from "@/lib/log";
@@ -19,6 +19,7 @@ import {
   mentionsUser,
   replyInThread,
   updateReply,
+  type SlackBlock,
   type SlackMessageEvent,
 } from "@/lib/slack-events";
 import type { SlackTriggerContext } from "@/lib/triggers";
@@ -36,8 +37,6 @@ type SlackReplyContext = {
   channel: string;
   eventTs: string;
   threadTs?: string;
-  /** The live-progress message, if one was posted — reused for the final answer. */
-  progressTs?: string;
   addressed: boolean;
 };
 
@@ -55,13 +54,23 @@ type SlackReplyContext = {
  * someone calling on the agent, which is decided here from the thread's root
  * message, and the agent itself must judge the message worth answering.
  *
- * Only an addressed run gets a live progress message, updated as tools are
- * called and replaced with the final answer when it's done. A run the agent
- * might stay silent on gets no placeholder — nothing appears in Slack until
- * it's known there is something to say, so overhearing a thread never looks
- * like the agent butting in to think out loud. Its session (see below) still
- * records that it looked and passed — that's a private, linkable audit trail,
- * not something the channel sees.
+ * An addressed run gets a live progress message right away, since someone is
+ * waiting on it. A run the agent might stay silent on (an unaddressed
+ * follow-up in a thread it was called into earlier) gets no placeholder up
+ * front — nothing appears until the first tool call shows it has actually
+ * decided to engage, so overhearing a thread never looks like the agent
+ * butting in to think out loud before it's said a word. If it never calls a
+ * tool and answers straight away, or stays silent, no progress message is
+ * posted at all. Its session (see below) still records that it looked and
+ * passed — that's a private, linkable audit trail, not something the channel
+ * sees.
+ *
+ * While it runs, each tool call is its own top-level line — nothing tucked
+ * behind a disclosure a person has to open to see what's happening. Once
+ * there's nothing left to report, it collapses into one checklist (see
+ * `createProgressTracker`'s `finish`) and stays there as a record of what the
+ * agent did; the final answer is always posted as its own new reply in the
+ * thread rather than overwriting it.
  */
 export async function answerSlackMessage(
   context: SlackTriggerContext & { botToken: string },
@@ -153,46 +162,47 @@ export async function answerSlackMessage(
     ],
   });
 
-  // Posted before the run starts, so the person sees something is happening
-  // rather than watching a mention sit unanswered while it works. Only for an
-  // addressed message — see the doc comment above.
-  let progressTs: string | undefined;
-  let progress: ReturnType<typeof createProgressTracker> | undefined;
-  if (addressed) {
-    // Linked from the checklist while it's live, so whoever's watching can
-    // jump to the full transcript without waiting for the run to finish.
-    const transcriptUrl = sessionUrl(sessionId);
+  // Linked from the checklist while it's live, so whoever's watching can jump
+  // to the full transcript without waiting for the run to finish.
+  const transcriptUrl = sessionUrl(sessionId);
+
+  // The message the checklist lives in — created lazily the first time it's
+  // published to. An addressed message publishes immediately, below, so the
+  // person sees something is happening rather than watching a mention sit
+  // unanswered. An unaddressed one waits for the first tool call, the
+  // earliest point it's clear the agent decided to engage rather than stay
+  // out of it — see the doc comment above.
+  let progressMessageTs: string | undefined;
+  const publishProgress = async ({ text, blocks }: { text: string; blocks: SlackBlock[] }) => {
     try {
-      progressTs = await replyInThread({
-        botToken: context.botToken,
-        channel: event.channel,
-        ts: event.ts,
-        threadTs: event.thread_ts,
-        text: renderProgress([]),
-        blocks: buildProgressBlocks([], transcriptUrl),
-      });
+      if (progressMessageTs) {
+        await updateReply({
+          botToken: context.botToken,
+          channel: event.channel,
+          ts: progressMessageTs,
+          text,
+          blocks,
+          unfurlLinks: false,
+        });
+      } else {
+        progressMessageTs = await replyInThread({
+          botToken: context.botToken,
+          channel: event.channel,
+          ts: event.ts,
+          threadTs: event.thread_ts,
+          text,
+          blocks,
+          unfurlLinks: false,
+        });
+      }
     } catch (error) {
-      log("could not post the progress placeholder, continuing without live updates", {
-        agent: agent.handle,
-        error,
-      });
+      log("progress update failed", { agent: agent.handle, error });
     }
-    if (progressTs) {
-      const placeholderTs = progressTs;
-      progress = createProgressTracker(
-        ({ text, blocks }) =>
-          updateReply({
-            botToken: context.botToken,
-            channel: event.channel,
-            ts: placeholderTs,
-            text,
-            blocks,
-          }).catch((error) => {
-            log("progress update failed", { agent: agent.handle, error });
-          }),
-        { sessionUrl: transcriptUrl },
-      );
-    }
+  };
+
+  const progress = createProgressTracker(publishProgress, { sessionUrl: transcriptUrl });
+  if (addressed) {
+    await publishProgress({ text: renderProgress([]), blocks: buildListBlocks([], transcriptUrl) });
   }
 
   const trigger = buildTrigger(event, addressed);
@@ -200,7 +210,6 @@ export async function answerSlackMessage(
     channel: event.channel,
     eventTs: event.ts,
     threadTs: event.thread_ts,
-    progressTs,
     addressed,
   };
 
@@ -210,7 +219,7 @@ export async function answerSlackMessage(
       agent,
       trigger,
       messages: buildMessages(context, event, thread),
-      onProgress: progress?.handle,
+      onProgress: progress.handle,
       onEvent: (runEvent) =>
         appendSessionEvent(sessionId, {
           type: runEvent.type,
@@ -222,14 +231,14 @@ export async function answerSlackMessage(
   } catch (error) {
     console.error(`Agent ${agent.handle} failed to answer`, error);
     log("run failed", { agent: agent.handle, ms: Date.now() - startedAt, error });
-    await progress?.settle();
+    await progress.finish();
     await finishRun(sessionId, context.botToken, reply, describeRunFailure(error), true);
     return;
   }
 
   if (outcome.status === "paused") {
     log("paused", { agent: agent.handle, ms: Date.now() - startedAt, approvals: outcome.approvals.length });
-    await progress?.settle();
+    await progress.finish();
     const { posted } = await requestApprovals({
       agent,
       botToken: context.botToken,
@@ -277,7 +286,7 @@ export async function answerSlackMessage(
       channel: event.channel,
       threadTs,
     });
-    await progress?.settle();
+    await progress.finish();
     await finishSession(sessionId, {
       status: "done",
       events: [
@@ -291,7 +300,7 @@ export async function answerSlackMessage(
     return;
   }
 
-  await progress?.settle();
+  await progress.finish();
   // A run that only called tools and said nothing still owes the thread a
   // word, or the message looks unanswered.
   await finishRun(sessionId, context.botToken, reply, outcome.text || "Done.", false);
@@ -426,9 +435,13 @@ function sessionTitle(event: SlackMessageEvent, addressed: boolean) {
 }
 
 /**
- * Posts (or edits) the thread's reply and closes out the session. Shared by
- * a run that finished outright and one that's coming back from a pause —
- * both end the same way, one message and a closed session.
+ * Posts the thread's reply and closes out the session. Shared by a run that
+ * finished outright and one that's coming back from a pause — both end the
+ * same way, one message and a closed session.
+ *
+ * Always a new message, even when a progress checklist is sitting in the
+ * thread — that checklist is left alone as the record of what the run did,
+ * not swapped out for the answer.
  */
 async function finishRun(
   sessionId: string,
@@ -439,24 +452,13 @@ async function finishRun(
   status: "done" | "failed" | "stopped" = runFailed ? "failed" : "done",
 ) {
   try {
-    if (reply.progressTs) {
-      // Replaces the progress message with the answer, rather than leaving
-      // the tool trail behind it — the trail was for watching the run happen,
-      // not a record anyone needs once it's done. The full trail still lives
-      // in the session's transcript for whoever wants it.
-      // `chat.update` keeps a message's previous blocks when none are given,
-      // so the checklist has to be cleared explicitly or it would sit above
-      // the final answer forever.
-      await updateReply({ botToken, channel: reply.channel, ts: reply.progressTs, text: toMrkdwn(text), blocks: [] });
-    } else {
-      await replyInThread({
-        botToken,
-        channel: reply.channel,
-        ts: reply.eventTs,
-        threadTs: reply.threadTs,
-        text: toMrkdwn(text),
-      });
-    }
+    await replyInThread({
+      botToken,
+      channel: reply.channel,
+      ts: reply.eventTs,
+      threadTs: reply.threadTs,
+      text: toMrkdwn(text),
+    });
     await finishSession(sessionId, {
       status,
       error: runFailed ? "The run failed before it could answer." : null,

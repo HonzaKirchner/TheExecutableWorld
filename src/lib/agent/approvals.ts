@@ -260,6 +260,8 @@ export async function postApprovalRequests(input: {
         channel: input.channel,
         text: `Approval needed: ${approval.serverName} — ${approval.toolName}`,
         blocks: approvalBlocks(approval, url),
+        unfurl_links: false,
+        unfurl_media: false,
       },
     });
     if (response.ts) {

@@ -3,39 +3,53 @@ import type { SlackBlock } from "@/lib/slack-events";
 
 export type ProgressEntry = { label: string; status: "running" | "ok" | "error" };
 
-/** The header shown above the list of tool calls. */
+/** The header shown on the collapsible summary once the run is done. */
 const PLAN_TITLE = "Working on the request";
+
+/** One entry, in Slack's own mrkdwn — shared by the text fallback and the live list. */
+function lineFor(entry: ProgressEntry): string {
+  if (entry.status === "running") return `⏳ _${entry.label}…_`;
+  if (entry.status === "error") return `⚠️ ${entry.label}`;
+  return `✅ ${entry.label}`;
+}
 
 /**
  * The live-progress message's text, in Slack's own mrkdwn — this never goes
  * through `toMrkdwn`, since it's written for Slack directly rather than being
- * the model's markdown. Doubles as the notification text for the `plan`
- * block below, and as the whole message if that block fails to render.
+ * the model's markdown. Doubles as the notification text for the blocks
+ * below, and as the whole message if those fail to render.
  */
 export function renderProgress(entries: readonly ProgressEntry[]): string {
   if (entries.length === 0) return "_Working on it…_";
-  return entries
-    .map((entry) => {
-      if (entry.status === "running") return `⏳ _${entry.label}…_`;
-      if (entry.status === "error") return `⚠️ ${entry.label}`;
-      return `✅ ${entry.label}`;
-    })
-    .join("\n");
+  return entries.map(lineFor).join("\n");
+}
+
+/** The small-print transcript link, shared by both block layouts below. */
+function contextBlock(sessionUrl: string): SlackBlock {
+  return { type: "context", elements: [{ type: "mrkdwn", text: `<${sessionUrl}|Full session>` }] };
 }
 
 /**
- * The same entries as Slack's own `plan`/`task` block kit, so the message
- * renders as a live checklist (Slack's agentic-app UI) rather than plain
- * text. One task per tool call — no nested sub-steps.
- *
- * `sessionUrl`, when given, is appended as a context line under the
- * checklist — Slack's small print, in `mrkdwn` since a context block's text
- * objects don't take anything else.
+ * Each tool call as its own top-level block — nothing nested under a
+ * collapsible header — so a run in progress reads as a plain, growing list
+ * rather than something tucked away behind a disclosure a person has to open.
+ * Used for every update while the run is still going.
  */
-export function buildProgressBlocks(
-  entries: readonly ProgressEntry[],
-  sessionUrl?: string,
-): SlackBlock[] {
+export function buildListBlocks(entries: readonly ProgressEntry[], sessionUrl?: string): SlackBlock[] {
+  const rows: SlackBlock[] =
+    entries.length === 0
+      ? [{ type: "section", text: { type: "mrkdwn", text: "_Working on it…_" } }]
+      : entries.map((entry) => ({ type: "section", text: { type: "mrkdwn", text: lineFor(entry) } }));
+  return sessionUrl ? [...rows, contextBlock(sessionUrl)] : rows;
+}
+
+/**
+ * The same entries collapsed into Slack's own `plan`/`task` block kit, so the
+ * finished run reads as one tidy, collapsible checklist instead of a list of
+ * bullets left sitting in the thread. Used once, when the run has nothing
+ * left to report.
+ */
+export function buildPlanBlocks(entries: readonly ProgressEntry[], sessionUrl?: string): SlackBlock[] {
   return [
     {
       type: "plan",
@@ -46,14 +60,7 @@ export function buildProgressBlocks(
         status: entry.status === "running" ? "in_progress" : entry.status === "error" ? "error" : "complete",
       })),
     },
-    ...(sessionUrl
-      ? [
-          {
-            type: "context",
-            elements: [{ type: "mrkdwn", text: `<${sessionUrl}|Full session>` }],
-          },
-        ]
-      : []),
+    ...(sessionUrl ? [contextBlock(sessionUrl)] : []),
   ];
 }
 
@@ -74,17 +81,25 @@ export function createProgressTracker(
   const indexByCallId = new Map<string, number>();
   let chain = Promise.resolve();
 
-  function flush() {
+  function flush(blocks: SlackBlock[]) {
     const text = renderProgress(entries);
-    const blocks = buildProgressBlocks(entries, options?.sessionUrl);
     chain = chain.then(() => publish({ text, blocks }));
   }
 
   return {
     handle(event: RunProgress) {
       if (event.type === "tool-start") {
-        indexByCallId.set(event.callId, entries.length);
-        entries.push({ label: event.label, status: "running" });
+        const existing = indexByCallId.get(event.callId);
+        if (existing !== undefined) {
+          // The same call id starting again — an internal retry the run
+          // callbacks don't otherwise surface. Reused in place, or the first
+          // attempt's entry would be orphaned "running" forever once the
+          // retry's own id took over the slot.
+          entries[existing] = { label: event.label, status: "running" };
+        } else {
+          indexByCallId.set(event.callId, entries.length);
+          entries.push({ label: event.label, status: "running" });
+        }
       } else {
         const index = indexByCallId.get(event.callId);
         // Not found only if the run somehow ends a call it never started —
@@ -93,9 +108,23 @@ export function createProgressTracker(
           entries[index] = { label: event.label, status: event.ok ? "ok" : "error" };
         }
       }
-      flush();
+      flush(buildListBlocks(entries, options?.sessionUrl));
     },
-    /** Waits for every update handed to `publish` so far to have run. */
-    settle: () => chain,
+    /**
+     * Called once, when there is nothing left to report — the run finished,
+     * failed, paused for approval, or decided to stay silent. Any entry still
+     * "running" at that point (a call whose end was never reported) is
+     * settled as done rather than left spinning forever, since nothing
+     * updates this message again after this. Collapses the flat list into
+     * Slack's own checklist summary and waits for every update queued so far,
+     * this one included, to have gone out.
+     */
+    finish() {
+      for (let i = 0; i < entries.length; i++) {
+        if (entries[i].status === "running") entries[i] = { ...entries[i], status: "ok" };
+      }
+      flush(buildPlanBlocks(entries, options?.sessionUrl));
+      return chain;
+    },
   };
 }
