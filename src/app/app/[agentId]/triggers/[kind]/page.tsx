@@ -1,12 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, CircleAlert, CircleCheck, Zap } from "lucide-react";
+import { ArrowLeft, ChevronRight, CircleAlert, CircleCheck, Zap } from "lucide-react";
 
 import { auth } from "@/auth";
 import { getAgent } from "@/lib/agents";
 import { gmailPushUrl, isGmailTriggerConfigured } from "@/lib/gmail/google";
 import { GMAIL_EVENTS } from "@/lib/gmail-events";
-import { getConnection } from "@/lib/mcp/connections";
+import { getConnection, listTools } from "@/lib/mcp/connections";
 import { MCP_CALLBACK_PATH } from "@/lib/mcp/oauth-provider";
 import { baseUrl } from "@/lib/base-url";
 import { missingScopes, SLACK_EVENTS } from "@/lib/slack-events-catalog";
@@ -27,9 +27,16 @@ import {
   StartGmailWatchButton,
   StopGmailWatchButton,
 } from "@/components/triggers/gmail-buttons";
-import { ConnectStripeButton, DisconnectStripeButton } from "@/components/triggers/stripe-buttons";
+import {
+  ConnectStripeButton,
+  ConnectStripeToolsButton,
+  DisconnectStripeButton,
+} from "@/components/triggers/stripe-buttons";
 import { TriggerEventsForm } from "@/components/triggers/trigger-events-form";
 import { Badge } from "@/components/ui/badge";
+
+/** The tool on Stripe's MCP server that performs every write, refunds included. */
+const STRIPE_WRITE_TOOL = "stripe_api_write";
 
 const ERRORS: Record<string, string> = {
   stripe_failed: "Stripe didn't complete the connection. Try again.",
@@ -391,7 +398,7 @@ async function StripeDetail({
     );
   }
 
-  const endpoint = await getStripeEndpoint();
+  const [endpoint, tools] = await Promise.all([getStripeEndpoint(), getConnection(agent.id, "stripe")]);
 
   return (
     <>
@@ -453,7 +460,79 @@ async function StripeDetail({
         options={STRIPE_EVENTS.map(({ id, name, description }) => ({ id, name, description }))}
         selected={trigger.events}
       />
+
+      <StripeActions agent={agent} connection={tools} />
     </>
+  );
+}
+
+/**
+ * Hearing about payments and acting on them are two separate grants: events
+ * come from the Stripe App installed above, actions — refunds first among
+ * them — from Stripe's own MCP server, connected like any server under
+ * Access. This is the same card, placed where the question comes up.
+ *
+ * Stripe's server has no per-object tools: every write, refunds included,
+ * goes through `stripe_api_write`, so that one tool is what "may refund"
+ * comes down to. Stripe adds its own check on top — a refund asked for over
+ * OAuth stops until a person approves it at a link Stripe hands back.
+ */
+async function StripeActions({
+  agent,
+  connection,
+}: {
+  agent: Awaited<ReturnType<typeof getAgent>> & object;
+  connection: Awaited<ReturnType<typeof getConnection>>;
+}) {
+  const authorized = connection?.status === "authorized";
+  const tools = authorized ? await listTools(connection.id) : [];
+  const allowed = tools.filter((tool) => tool.allowed);
+  const write = tools.find((tool) => tool.name === STRIPE_WRITE_TOOL);
+
+  return (
+    <section className="mt-10">
+      <h2 className="text-lg font-semibold tracking-tight">Actions</h2>
+      <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+        Events only tell @{agent.handle} what happened. To let it act — refund a payment, look
+        up a customer, cancel a subscription — connect Stripe&apos;s own MCP server, the same as
+        any server under Access. Stripe asks which account to grant. Each tool is off until you
+        allow it; refunds and every other change go through the one write tool, and Stripe
+        itself holds a refund until someone approves it at a link it sends back.
+      </p>
+
+      {authorized ? (
+        <Link
+          href={`/app/${agent.id}/access/stripe`}
+          className="group mt-4 flex items-center justify-between gap-4 rounded-xl border border-emerald-300/70 bg-emerald-50/40 px-5 py-4 transition-all hover:-translate-y-0.5 hover:border-emerald-400/80 hover:shadow-sm dark:border-emerald-800/60 dark:bg-emerald-950/20"
+        >
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <Dot tone="emerald">Stripe tools connected</Dot>
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {tools.length === 0
+                ? "No tools reported yet."
+                : `${allowed.length} of ${tools.length} tools allowed`}
+              {write
+                ? write.allowed
+                  ? write.requiresApproval
+                    ? " · may refund, with approval"
+                    : " · may refund without approval"
+                  : " · read-only: refunds not allowed yet"
+                : null}
+            </p>
+          </div>
+          <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-emerald-800 dark:text-emerald-300">
+            Manage tools
+            <ChevronRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
+          </span>
+        </Link>
+      ) : (
+        <div className="mt-4">
+          <ConnectStripeToolsButton agentId={agent.id} />
+        </div>
+      )}
+    </section>
   );
 }
 

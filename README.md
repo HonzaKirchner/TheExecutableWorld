@@ -357,6 +357,31 @@ As with Slack, the events URL has to be reachable from the internet, so it uses
 shares the database. Test-mode installs send test events only; a sandbox install sends
 events only to an endpoint in that sandbox.
 
+#### Acting on Stripe
+
+The trigger only tells the agent what happened. Acting — refunding a payment, looking up a
+customer, cancelling a subscription — is a second grant, to **Stripe's own MCP server**
+(`https://mcp.stripe.com`, [docs](https://docs.stripe.com/mcp)), connected under Access like
+any other server; the trigger page offers the same button under **Actions** and says whether
+the agent may refund. The two grants are separate on purpose: the App install delivers
+events to the platform without holding write permissions on anyone's account, while the MCP
+grant is the person's own OAuth session with Stripe, scoped to the account (live or sandbox)
+they pick on Stripe's consent page and revocable there under **OAuth sessions**. Stripe's
+authorization server registers clients dynamically (public client with PKCE), so nothing is
+configured for it on the deployment.
+
+Stripe's server exposes no per-object tools. Reads go through `stripe_api_read` and every
+write — refunds included — through `stripe_api_write`, with `stripe_api_search` /
+`stripe_api_details` for finding the right API method, `get_stripe_account_info`, and
+`search_stripe_documentation` alongside. So "may refund" comes down to allowing
+`stripe_api_write`, which allows every other write too; the approval flag applies to the
+whole tool. Stripe adds a check of its own: a refund (or outbound payment) requested over an
+OAuth session is withheld and answered with a link where a person approves it, after which
+the agent has to retry with the approval token Stripe issues — the approval lapses after 24
+hours. Stripe's OAuth doesn't act on *connected* accounts (for that Stripe wants a platform
+restricted key plus a `Stripe-Account` header), so the MCP grant is always for an account
+the person can sign into — normally the same one they installed the App into.
+
 ### Gmail
 
 A Gmail trigger wakes the agent when mail lands in a mailbox. Gmail has no webhooks of its
@@ -433,6 +458,12 @@ registered by hand, named per server in the catalog (`clientEnv`) and read from 
 environment; the provider hands it to the SDK in place of a registered one. Servers
 outside the catalog are added with the **Custom** card, by URL; they get a generated
 `custom-…` id and keep their name on the connection row.
+
+**Stripe** is Stripe's own remote server at `mcp.stripe.com`, connected the standard way —
+its authorization server registers clients dynamically and the person picks the account on
+Stripe's consent page — so it needs nothing from the environment. It is how an agent acts
+on Stripe (refunds first among the reasons); the Stripe *trigger* is a separate grant. See
+[Acting on Stripe](#acting-on-stripe) for its tools and how Stripe has refunds approved.
 
 **Gmail** is served by this app itself, at `/api/mcp/gmail`
 ([src/lib/gmail/mcp-server.ts](src/lib/gmail/mcp-server.ts)). Google's own Gmail MCP

@@ -73,8 +73,8 @@ export function AccessSection({
 function Item({ index, children }: { index: number; children: React.ReactNode }) {
   return (
     <li
-      className="animate-in fade-in slide-in-from-bottom-1 duration-500 [animation-fill-mode:backwards]"
-      style={{ animationDelay: `${index * 40}ms` }}
+      className="animate-in fade-in slide-in-from-bottom-1 duration-300 [animation-fill-mode:backwards]"
+      style={{ animationDelay: `${index * 30}ms` }}
     >
       {children}
     </li>

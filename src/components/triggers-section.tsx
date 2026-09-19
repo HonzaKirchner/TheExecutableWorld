@@ -97,10 +97,10 @@ export function TriggersSection({
           );
 
           const className =
-            "group flex h-full gap-4 rounded-xl border bg-card p-4 transition-all animate-in fade-in slide-in-from-bottom-1 duration-500 [animation-fill-mode:backwards]";
+            "group flex h-full gap-4 rounded-xl border bg-card p-4 transition-all animate-in fade-in slide-in-from-bottom-1 duration-300 [animation-fill-mode:backwards]";
 
           return (
-            <li key={definition.id} style={{ animationDelay: `${i * 40}ms` }} className="contents">
+            <li key={definition.id} style={{ animationDelay: `${i * 30}ms` }} className="contents">
               {available ? (
                 <Link
                   href={`/app/${agent.id}/triggers/${definition.id}`}

@@ -76,6 +76,18 @@ export const MCP_SERVERS: readonly McpServerDefinition[] = [
     resourceIndicator: false,
   },
   {
+    id: "stripe",
+    name: "Stripe",
+    description:
+      "Act on a Stripe account — look up payments and customers, issue refunds, manage subscriptions.",
+    // Stripe's own remote MCP server (https://docs.stripe.com/mcp). Its
+    // authorization server registers clients dynamically and issues tokens
+    // for the one account the person picks, so there's nothing to configure.
+    // Separate from the Stripe *trigger*, which rides on this deployment's
+    // Stripe App: that install delivers events, this grant performs actions.
+    url: "https://mcp.stripe.com",
+  },
+  {
     id: "linear",
     name: "Linear",
     description: "Issues, projects and cycles.",
