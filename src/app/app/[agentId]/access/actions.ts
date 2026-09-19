@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
 import { requireAgent } from "@/app/app/require-agent";
-import { getAgentSlackCredentials, setSlackInstallState, type Agent } from "@/lib/agents";
+import type { Agent } from "@/lib/agents";
 import {
   connectionBlocker,
   CUSTOM_SERVER_NAME_MAX,
@@ -27,8 +27,7 @@ import {
 } from "@/lib/mcp/connections";
 import { suggestApproval } from "@/lib/mcp/tools";
 import { stopGmailWatch } from "@/lib/gmail/watch";
-import { botScopesFor, DEFAULT_SLACK_EVENTS } from "@/lib/slack-events-catalog";
-import { buildInstallUrl, newInstallState } from "@/lib/slack-install";
+import { parseInstallReturnTo, startSlackInstall } from "@/lib/slack-install";
 import { getTrigger } from "@/lib/triggers";
 
 export type AccessActionState = { error?: string };
@@ -212,7 +211,12 @@ export async function saveToolAccessAction(
   redirect(`/app/${agent.id}`);
 }
 
-/** Sends the person to Slack to install the agent's app into their workspace. */
+/**
+ * Sends the person to Slack to install the agent's app into their workspace.
+ * `returnTo` says where the callback should land them: the agent's page by
+ * default, or the Slack trigger's page when the install was started from its
+ * card, so that choosing events is the very next thing they see.
+ */
 export async function installSlackAppAction(
   _previous: AccessActionState,
   formData: FormData,
@@ -222,32 +226,11 @@ export async function installSlackAppAction(
 
   let url;
   try {
-    url = await beginSlackInstall(agent);
+    url = await startSlackInstall(agent, parseInstallReturnTo(formData.get("returnTo")));
   } catch (error) {
     return { error: error instanceof Error ? error.message : "Could not start the install." };
   }
   redirect(url);
-}
-
-async function beginSlackInstall(agent: Agent) {
-  const credentials = await getAgentSlackCredentials(agent.id);
-  if (!credentials) {
-    throw new Error("This agent has no Slack app to install.");
-  }
-
-  // The scopes asked for have to match the manifest's, which follow from the
-  // events the agent's Slack trigger listens for.
-  const trigger = await getTrigger(agent.id, "slack");
-  const scopes = botScopesFor(trigger?.events ?? DEFAULT_SLACK_EVENTS);
-
-  const state = newInstallState();
-  await setSlackInstallState(agent.id, state);
-  return buildInstallUrl({
-    clientId: credentials.clientId,
-    workspaceId: agent.workspaceId,
-    state,
-    scopes,
-  });
 }
 
 function connectionFailureMessage(serverName: string, error: unknown) {

@@ -8,7 +8,7 @@ import {
   getAgentSlackCredentials,
   markSlackInstalled,
 } from "@/lib/agents";
-import { exchangeInstallCode, revokeInstallation } from "@/lib/slack-install";
+import { exchangeInstallCode, installReturnTo, revokeInstallation } from "@/lib/slack-install";
 
 /**
  * Where Slack sends people after they've installed (or declined to install)
@@ -25,7 +25,10 @@ export async function GET(request: NextRequest) {
     return new Response("Unknown or expired install.", { status: 400 });
   }
 
-  const back = `/app/${agent.id}`;
+  // The `state` says where the install was started from: the agent's page
+  // or the Slack trigger's, whose next step — picking events — is right there.
+  const agentPage = `/app/${agent.id}`;
+  const back = installReturnTo(state!) === "trigger" ? `${agentPage}/triggers/slack` : agentPage;
 
   const session = await auth();
   if (session?.slack?.teamId !== agent.workspaceId) {
@@ -60,7 +63,7 @@ export async function GET(request: NextRequest) {
   }
 
   await markSlackInstalled(agent.id, installation);
-  revalidatePath(back);
+  revalidatePath(agentPage);
   revalidatePath("/app");
   return redirectTo(back, { installed: "1" });
 }

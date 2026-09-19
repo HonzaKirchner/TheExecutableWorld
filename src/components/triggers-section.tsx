@@ -11,6 +11,10 @@ import {
   type Trigger,
   type TriggerKind,
 } from "@/lib/triggers";
+import {
+  InstallSlackTriggerCard,
+  InstallSlackTriggerLabel,
+} from "@/components/triggers/install-slack-trigger-card";
 import { Badge } from "@/components/ui/badge";
 import {
   Tooltip,
@@ -51,6 +55,9 @@ export function TriggersSection({
           const available = configured[definition.id];
           const { tone, label, hint } = describe(definition.id, trigger, agent, available, gmailConnected);
           const active = tone === "emerald";
+          // Until the app is installed the Slack card starts the install
+          // itself instead of opening a page that can't do anything yet.
+          const installs = definition.id === "slack" && Boolean(trigger) && !agent.slackInstalledAt;
 
           const body = (
             <>
@@ -86,7 +93,9 @@ export function TriggersSection({
                   </div>
                 ) : null}
 
-                {available ? (
+                {installs ? (
+                  <InstallSlackTriggerLabel />
+                ) : available ? (
                   <span className="mt-3 flex items-center gap-0.5 text-xs text-muted-foreground transition-colors group-hover:text-foreground">
                     {trigger ? "Manage events" : "Set up"}
                     <ChevronRight className="size-3.5" />
@@ -101,7 +110,11 @@ export function TriggersSection({
 
           return (
             <li key={definition.id} style={{ animationDelay: `${i * 30}ms` }} className="contents">
-              {available ? (
+              {installs ? (
+                <InstallSlackTriggerCard agentId={agent.id} className={className}>
+                  {body}
+                </InstallSlackTriggerCard>
+              ) : available ? (
                 <Link
                   href={`/app/${agent.id}/triggers/${definition.id}`}
                   className={`${className} hover:-translate-y-0.5 hover:shadow-sm ${
@@ -134,7 +147,11 @@ function describe(
     if (!trigger) return { tone: "muted", label: "Not added" };
     return agent.slackInstalledAt
       ? { tone: "emerald", label: "Active" }
-      : { tone: "amber", label: "Waiting for install" };
+      : {
+          tone: "amber",
+          label: "Not installed",
+          hint: "Install the app to your workspace first; then choose the events it listens for.",
+        };
   }
 
   if (kind === "gmail") {

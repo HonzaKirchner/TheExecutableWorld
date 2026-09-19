@@ -33,6 +33,7 @@ import {
   DisconnectStripeButton,
 } from "@/components/triggers/stripe-buttons";
 import { TriggerEventsForm } from "@/components/triggers/trigger-events-form";
+import { InstallSlackButton } from "@/components/access/install-slack-button";
 import { Badge } from "@/components/ui/badge";
 
 /** The tool on Stripe's MCP server that performs every write, refunds included. */
@@ -42,10 +43,14 @@ const ERRORS: Record<string, string> = {
   stripe_failed: "Stripe didn't complete the connection. Try again.",
   stripe_wrong_workspace:
     "That connection was started from another workspace's session, so it was ignored.",
+  slack_failed: "Slack didn't complete the install. Try again.",
+  slack_wrong_workspace:
+    "The app was installed into a different Slack workspace than this agent belongs to, so the install was undone. Pick this workspace when Slack asks.",
 };
 
 const CANCELLATIONS: Record<string, string> = {
   stripe_denied: "The Stripe connection was cancelled.",
+  slack_denied: "The Slack install was cancelled.",
 };
 
 export default async function TriggerPage({
@@ -99,6 +104,12 @@ export default async function TriggerPage({
 
       {query.connected === "1" ? (
         <Notice icon={CircleCheck}>Stripe account connected. Now pick the events to listen for.</Notice>
+      ) : null}
+      {query.installed === "1" ? (
+        <Notice icon={CircleCheck}>
+          Installed. @{agent.handle} is in your Slack workspace — now choose the events it
+          listens for.
+        </Notice>
       ) : null}
       {query.started === "1" ? (
         <Notice icon={CircleCheck}>Listening. New mail in the inbox now reaches @{agent.handle}.</Notice>
@@ -275,6 +286,20 @@ async function SlackDetail({
 
   return (
     <>
+      {agent.slackInstalledAt ? null : (
+        <section className="mt-8 rounded-2xl border border-violet-200/70 bg-gradient-to-br from-violet-50 via-fuchsia-50/60 to-rose-50/50 px-6 py-8 sm:px-8 dark:border-violet-900/50 dark:from-violet-950/40 dark:via-fuchsia-950/20 dark:to-rose-950/10">
+          <h2 className="text-lg font-semibold tracking-tight">Install @{agent.handle} to Slack first</h2>
+          <p className="mt-1 max-w-lg text-sm text-muted-foreground">
+            Nothing reaches the agent until its app is in the workspace. Slack will ask you to
+            approve the app&apos;s permissions; afterwards you land back here to choose the
+            events.
+          </p>
+          <div className="mt-5">
+            <InstallSlackButton agentId={agent.id} accent returnTo="trigger" align="start" />
+          </div>
+        </section>
+      )}
+
       <dl className="mt-8 grid gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-[1fr_2fr]">
         <Field label="Status">
           {agent.slackInstalledAt ? (
@@ -284,7 +309,7 @@ async function SlackDetail({
               <Dot tone="emerald">Active</Dot>
             )
           ) : (
-            <Dot tone="amber">Waiting for install</Dot>
+            <Dot tone="amber">Not installed</Dot>
           )}
         </Field>
         <Field label="Webhook">

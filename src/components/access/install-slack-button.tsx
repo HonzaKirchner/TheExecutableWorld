@@ -7,18 +7,25 @@ import {
   installSlackAppAction,
   type AccessActionState,
 } from "@/app/app/[agentId]/access/actions";
+import type { InstallReturnTo } from "@/lib/slack-install";
 import { Button } from "@/components/ui/button";
 
 export function InstallSlackButton({
   agentId,
   reinstall,
   accent,
+  returnTo,
+  align = "end",
 }: {
   agentId: string;
   /** The app is already installed; offer to run the install again. */
   reinstall?: boolean;
   /** The page's call to action: coloured to match the install panel. */
   accent?: boolean;
+  /** Where Slack should send the person back to. The agent's page unless said otherwise. */
+  returnTo?: InstallReturnTo;
+  /** Which edge the button and its error line hug. */
+  align?: "start" | "end";
 }) {
   const [state, formAction, pending] = useActionState<AccessActionState, FormData>(
     installSlackAppAction,
@@ -26,8 +33,12 @@ export function InstallSlackButton({
   );
 
   return (
-    <form action={formAction} className="flex flex-col items-end gap-2">
+    <form
+      action={formAction}
+      className={`flex flex-col gap-2 ${align === "end" ? "items-end" : "items-start"}`}
+    >
       <input type="hidden" name="agentId" value={agentId} />
+      {returnTo ? <input type="hidden" name="returnTo" value={returnTo} /> : null}
       <Button
         type="submit"
         size={accent ? "lg" : "default"}

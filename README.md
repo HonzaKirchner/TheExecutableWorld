@@ -275,6 +275,16 @@ events need more than that.
 The id has to be known before the app is created (the manifest carries the URL), so the
 action generates it up front and inserts the trigger right after the agent.
 
+Until the app is installed the trigger's card on the agent's page doesn't open a page: it
+**starts the install** (`installSlackAppAction` with `returnTo=trigger`), because nothing
+on the trigger page can do anything before that. Slack's callback then lands on the
+trigger's page, where choosing events is the next step; the trigger page also offers the
+install itself, for anyone who gets there first. The destination rides inside the OAuth
+`state` — `<random>.agent` or `<random>.trigger`, a suffix Slack returns verbatim
+([src/lib/slack-install.ts](src/lib/slack-install.ts)) — so the install panel at the bottom
+of the agent's page keeps landing on the agent's page. A `state` without a suffix, from an
+install started before this existed, resolves to the agent's page too.
+
 **Slack verifies the URL with a challenge when the manifest is created**, so the endpoint
 must be deployed before agents can be created — from local development too. That's what
 `PUBLIC_BASE_URL` is for: the production origin, used only for this URL. Everything else
