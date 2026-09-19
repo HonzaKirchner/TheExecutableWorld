@@ -117,9 +117,11 @@ function Dot({ status }: { status: SessionSummary["status"] }) {
   const color =
     status === "running"
       ? "bg-emerald-600"
-      : status === "failed"
-        ? "bg-rose-600"
-        : "bg-muted-foreground/40";
+      : status === "paused"
+        ? "bg-amber-500"
+        : status === "failed"
+          ? "bg-rose-600"
+          : "bg-muted-foreground/40";
   return (
     <span className="relative flex size-2 shrink-0" title={status}>
       {status === "running" ? (

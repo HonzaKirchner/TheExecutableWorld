@@ -48,6 +48,20 @@ export type McpTool = {
   annotations: ToolAnnotations | null;
   allowed: boolean;
   requiresApproval: boolean;
+  classifierEnabled: boolean;
+  classifierSystemPrompt: string | null;
+  classifierContext: string | null;
+  classifierAutoApprove: string | null;
+  classifierEscalate: string | null;
+};
+
+/** What a person can set about a gated tool's classifier, from a form. */
+export type ClassifierSettings = {
+  enabled: boolean;
+  systemPrompt: string | null;
+  context: string | null;
+  autoApproveWhen: string | null;
+  escalateWhen: string | null;
 };
 
 /** A tool as the server reports it, before anyone has decided anything. */
@@ -96,6 +110,11 @@ type ToolRow = {
   annotations: ToolAnnotations | null;
   allowed: boolean;
   requires_approval: boolean;
+  classifier_enabled: boolean;
+  classifier_system_prompt: string | null;
+  classifier_context: string | null;
+  classifier_auto_approve: string | null;
+  classifier_escalate: string | null;
 };
 
 /** As stored: the three secret columns are encrypted text (JSON inside). */
@@ -131,6 +150,11 @@ function toTool(row: ToolRow): McpTool {
     annotations: row.annotations,
     allowed: row.allowed,
     requiresApproval: row.requires_approval,
+    classifierEnabled: row.classifier_enabled,
+    classifierSystemPrompt: row.classifier_system_prompt,
+    classifierContext: row.classifier_context,
+    classifierAutoApprove: row.classifier_auto_approve,
+    classifierEscalate: row.classifier_escalate,
   };
 }
 
@@ -294,7 +318,9 @@ export async function listTools(connectionId: string): Promise<McpTool[]> {
   const sql = db();
 
   const rows = (await sql`
-    select name, title, description, annotations, allowed, requires_approval
+    select name, title, description, annotations, allowed, requires_approval,
+           classifier_enabled, classifier_system_prompt, classifier_context,
+           classifier_auto_approve, classifier_escalate
     from mcp_tools
     where connection_id = ${connectionId}
     order by name
@@ -356,11 +382,16 @@ export async function syncTools(
  * Records the person's decisions. Tools not in `allowed` are switched off but
  * keep their approval flag: the form doesn't submit it for tools that aren't
  * allowed, and the suggestion should still be there if one is allowed later.
+ *
+ * `classifiers` only ever touches tools that are both allowed and gated —
+ * the form has nothing to say about any other tool's classifier, so those
+ * rows are left exactly as they were.
  */
 export async function saveToolAccess(
   connectionId: string,
   allowed: Iterable<string>,
   requiresApproval: Iterable<string>,
+  classifiers: ReadonlyMap<string, ClassifierSettings> = new Map(),
 ) {
   await ensureSchema();
   const sql = db();
@@ -374,6 +405,32 @@ export async function saveToolAccess(
          end
      where connection_id = $1`,
     [connectionId, [...allowed], [...requiresApproval]],
+  );
+
+  if (classifiers.size === 0) return;
+
+  const rows = [...classifiers].map(([name, settings]) => ({
+    name,
+    classifier_enabled: settings.enabled,
+    classifier_system_prompt: settings.systemPrompt,
+    classifier_context: settings.context,
+    classifier_auto_approve: settings.autoApproveWhen,
+    classifier_escalate: settings.escalateWhen,
+  }));
+
+  await sql.query(
+    `update mcp_tools t
+     set classifier_enabled      = r.classifier_enabled,
+         classifier_system_prompt = r.classifier_system_prompt,
+         classifier_context       = r.classifier_context,
+         classifier_auto_approve  = r.classifier_auto_approve,
+         classifier_escalate      = r.classifier_escalate
+     from jsonb_to_recordset($2::jsonb) as r(
+       name text, classifier_enabled boolean, classifier_system_prompt text,
+       classifier_context text, classifier_auto_approve text, classifier_escalate text
+     )
+     where t.connection_id = $1 and t.name = r.name`,
+    [connectionId, JSON.stringify(rows)],
   );
 }
 

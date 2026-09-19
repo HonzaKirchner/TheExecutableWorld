@@ -1,11 +1,18 @@
 import type { ModelMessage } from "ai";
 
-import { getAgentById } from "@/lib/agents";
+import { getAgentBotToken, getAgentById } from "@/lib/agents";
+import { deletePause, getPause, requestApprovals } from "@/lib/agent/approvals";
 import { createProgressTracker, renderProgress } from "@/lib/agent/progress";
-import { isSilence } from "@/lib/agent/prompt";
-import { describeRunFailure, runAgent } from "@/lib/agent/run";
+import { isSilence, type TriggerContext } from "@/lib/agent/prompt";
+import { continueAgentRun, describeRunFailure, runAgent, type ApprovalDecision, type RunOutcome } from "@/lib/agent/run";
 import { debugScope, preview } from "@/lib/log";
-import { appendSessionEvent, finishSession, startSession } from "@/lib/sessions";
+import {
+  appendSessionEvent,
+  finishSession,
+  pauseSession,
+  startSession,
+  unpauseSession,
+} from "@/lib/sessions";
 import {
   fetchThread,
   mentionsUser,
@@ -19,6 +26,19 @@ const log = debugScope("slack.answer");
 
 /** How much of a thread to hand the model. Oldest messages are dropped first. */
 const THREAD_LIMIT = 50;
+
+/**
+ * What `answerSlackMessage` needs to finish the job once a paused run picks
+ * back up — stored on the pause row as opaque JSON and read back only here.
+ */
+type SlackReplyContext = {
+  channel: string;
+  eventTs: string;
+  threadTs?: string;
+  /** The live-progress message, if one was posted — reused for the final answer. */
+  progressTs?: string;
+  addressed: boolean;
+};
 
 /**
  * Answers a Slack message as the agent.
@@ -152,127 +172,220 @@ export async function answerSlackMessage(
     }
   }
 
-  let text: string;
-  // Whether the run itself came back with an answer — kept separate from
-  // whether Slack accepted the reply, since a session is `failed` if either
-  // step didn't, even though `text` (the apology) still gets a post attempt.
-  let runFailed = false;
+  const trigger = buildTrigger(event, addressed);
+  const reply: SlackReplyContext = {
+    channel: event.channel,
+    eventTs: event.ts,
+    threadTs: event.thread_ts,
+    progressTs,
+    addressed,
+  };
+
+  let outcome: RunOutcome;
   try {
-    const run = await runAgent({
+    outcome = await runAgent({
       agent,
-      trigger: {
-        description: describeTrigger(event, addressed),
-        facts: [
-          `The person who wrote to you is <@${event.user ?? "unknown"}>.`,
-          "Your answer is posted in the thread, so keep it to what fits in a chat message.",
-        ],
-        mayStaySilent: !addressed,
-      },
+      trigger,
       messages: buildMessages(context, event, thread),
       onProgress: progress?.handle,
-      onEvent: (runEvent) => {
+      onEvent: (runEvent) =>
         appendSessionEvent(sessionId, {
           type: runEvent.type,
           role: runEvent.type === "tool_call" ? "agent" : "system",
           body: runEvent.body,
           data: runEvent.data,
-        }).catch((error) => log("failed to append a session event", { error }));
-      },
+        }).catch((error) => log("failed to append a session event", { error })),
     });
-
-    console.log(
-      `Agent ${agent.handle} answered in ${event.channel}: ${run.steps} step(s), ` +
-        `${run.toolCalls.length} tool call(s)`,
-    );
-    log("run finished", {
-      agent: agent.handle,
-      ms: Date.now() - startedAt,
-      steps: run.steps,
-      toolCalls: run.toolCalls.map((call) => `${call.name}${call.ok ? "" : "!"}`).join(","),
-      chars: run.text.length,
-      // The empty case is the one worth seeing: the model called tools and
-      // then said nothing, so the thread gets a bare "Done."
-      text: preview(run.text),
-    });
-
-    // Only offered when the agent wasn't spoken to, so a mention can never end
-    // in silence — see `mayStaySilent`.
-    if (!addressed && isSilence(run.text)) {
-      log("stayed out: the agent judged the message wasn't for it", {
-        agent: agent.handle,
-        channel: event.channel,
-        threadTs,
-      });
-      await finishSession(sessionId, {
-        status: "done",
-        events: [
-          {
-            type: "note",
-            role: "agent",
-            body: "Looked at the message and stayed out — it wasn't addressed to me.",
-          },
-        ],
-      });
-      return;
-    }
-
-    // A run that only called tools and said nothing still owes the thread a
-    // word, or the message looks unanswered.
-    text = run.text || "Done.";
   } catch (error) {
     console.error(`Agent ${agent.handle} failed to answer`, error);
     log("run failed", { agent: agent.handle, ms: Date.now() - startedAt, error });
-    text = describeRunFailure(error);
-    runFailed = true;
-    // Still worth trying to post `text` below — it's the same apology the
-    // person would otherwise get in silence.
+    await progress?.settle();
+    await finishRun(sessionId, context.botToken, reply, describeRunFailure(error), true);
+    return;
   }
 
-  // Every progress update handed to `publish` above is fire-and-forget, so
-  // one from late in the run could otherwise land after this final write and
-  // overwrite it with a stale "still working" state.
-  await progress?.settle();
-
-  try {
-    if (progressTs) {
-      // Replaces the progress message with the answer, rather than leaving
-      // the tool trail behind it — the trail was for watching the run happen,
-      // not a record anyone needs once it's done. The full trail still lives
-      // in the session's transcript for whoever wants it.
-      await updateReply({
-        botToken: context.botToken,
-        channel: event.channel,
-        ts: progressTs,
-        text: toMrkdwn(text),
-      });
-    } else {
-      await replyInThread({
-        botToken: context.botToken,
-        channel: event.channel,
-        ts: event.ts,
-        threadTs: event.thread_ts,
-        text: toMrkdwn(text),
-      });
+  if (outcome.status === "paused") {
+    log("paused", { agent: agent.handle, ms: Date.now() - startedAt, approvals: outcome.approvals.length });
+    await progress?.settle();
+    const { posted } = await requestApprovals({
+      agent,
+      botToken: context.botToken,
+      sessionId,
+      approvals: outcome.approvals,
+      resumeMessages: outcome.resumeMessages,
+      triggerKind: "slack",
+      triggerContext: trigger,
+      replyContext: reply,
+    });
+    if (!posted) {
+      await finishRun(
+        sessionId,
+        context.botToken,
+        reply,
+        "I can't do that without a person's sign-off, and no approval channel is set up for me yet — ask whoever manages me to set one.",
+        true,
+      );
+      return;
     }
+    await pauseSession(sessionId, [
+      { type: "note", role: "system", body: "Waiting for a person's approval." },
+    ]);
+    return;
+  }
+
+  console.log(
+    `Agent ${agent.handle} answered in ${event.channel}: ${outcome.steps} step(s), ` +
+      `${outcome.toolCalls.length} tool call(s)`,
+  );
+  log("run finished", {
+    agent: agent.handle,
+    ms: Date.now() - startedAt,
+    steps: outcome.steps,
+    toolCalls: outcome.toolCalls.map((call) => `${call.name}${call.ok ? "" : "!"}`).join(","),
+    chars: outcome.text.length,
+    text: preview(outcome.text),
+  });
+
+  // Only offered when the agent wasn't spoken to, so a mention can never end
+  // in silence — see `mayStaySilent`.
+  if (!addressed && isSilence(outcome.text)) {
+    log("stayed out: the agent judged the message wasn't for it", {
+      agent: agent.handle,
+      channel: event.channel,
+      threadTs,
+    });
+    await progress?.settle();
     await finishSession(sessionId, {
-      status: runFailed ? "failed" : "done",
-      error: runFailed ? "The run failed before it could answer." : null,
-      events: [{ type: "reply", role: "agent", body: text }],
+      status: "done",
+      events: [
+        {
+          type: "note",
+          role: "agent",
+          body: "Looked at the message and stayed out — it wasn't addressed to me.",
+        },
+      ],
+    });
+    return;
+  }
+
+  await progress?.settle();
+  // A run that only called tools and said nothing still owes the thread a
+  // word, or the message looks unanswered.
+  await finishRun(sessionId, context.botToken, reply, outcome.text || "Done.", false);
+}
+
+/**
+ * Picks a paused Slack run back up once every gated call it was waiting on
+ * has a decision. Called by the interactions route, never directly by a
+ * webhook — the pause is what remembers everything a webhook once knew.
+ */
+export async function resumeSlackRun(sessionId: string, decisions: ApprovalDecision[]) {
+  const pause = await getPause(sessionId);
+  if (!pause) {
+    log("resume: no pause row, giving up", { sessionId });
+    return;
+  }
+  const reply = pause.replyContext as SlackReplyContext;
+
+  const agent = await getAgentById(pause.agentId);
+  const botToken = agent ? await getAgentBotToken(agent.id) : null;
+  if (!agent || !botToken) {
+    console.error(`Cannot resume session ${sessionId}: agent or bot token missing`);
+    await finishSession(sessionId, { status: "failed", error: "The agent or its Slack install is gone." });
+    await deletePause(sessionId);
+    return;
+  }
+
+  await unpauseSession(sessionId);
+
+  let outcome: RunOutcome;
+  try {
+    outcome = await continueAgentRun({
+      agent,
+      trigger: pause.triggerContext,
+      messages: pause.resumeMessages,
+      decisions,
+      onEvent: (runEvent) =>
+        appendSessionEvent(sessionId, {
+          type: runEvent.type,
+          role: runEvent.type === "tool_call" ? "agent" : "system",
+          body: runEvent.body,
+          data: runEvent.data,
+        }).catch(() => {}),
     });
   } catch (error) {
-    // The last place a message can vanish: the run worked, the answer exists,
-    // and Slack refused to post it — a missing `chat:write`, or a channel the
-    // app was never added to.
-    console.error(`Agent ${agent.handle} could not post its reply`, error);
-    log("reply failed", { agent: agent.handle, channel: event.channel, error });
+    console.error(`Agent ${agent.handle} failed to resume`, error);
+    await deletePause(sessionId);
+    await finishRun(sessionId, botToken, reply, describeRunFailure(error), true);
+    return;
+  }
+
+  if (outcome.status === "paused") {
+    // Reached another gated tool call further down the line — same dance,
+    // one level deeper. The pause row is simply overwritten.
+    await deletePause(sessionId);
+    const { posted } = await requestApprovals({
+      agent,
+      botToken,
+      sessionId,
+      approvals: outcome.approvals,
+      resumeMessages: outcome.resumeMessages,
+      triggerKind: "slack",
+      triggerContext: pause.triggerContext,
+      replyContext: reply,
+    });
+    if (!posted) {
+      await finishRun(
+        sessionId,
+        botToken,
+        reply,
+        "I can't do that without a person's sign-off, and no approval channel is set up for me yet.",
+        true,
+      );
+      return;
+    }
+    await pauseSession(sessionId, [
+      { type: "note", role: "system", body: "Waiting for a person's approval." },
+    ]);
+    return;
+  }
+
+  await deletePause(sessionId);
+  await finishRun(sessionId, botToken, reply, outcome.text || "Done.", false);
+}
+
+/** Stops a paused Slack run for good — a person clicked "Stop agent". */
+export async function stopSlackRun(sessionId: string, stoppedBy: string | null, note: string | null) {
+  const pause = await getPause(sessionId);
+  await deletePause(sessionId);
+  const reply = pause?.replyContext as SlackReplyContext | undefined;
+  const agent = pause ? await getAgentById(pause.agentId) : null;
+  const botToken = agent ? await getAgentBotToken(agent.id) : null;
+
+  const text = note
+    ? `Stopped by ${stoppedBy ?? "a person"}: ${note}`
+    : `Stopped by ${stoppedBy ?? "a person"} before finishing.`;
+
+  if (reply && botToken) {
+    await finishRun(sessionId, botToken, reply, text, false, "stopped");
+  } else {
     await finishSession(sessionId, {
-      status: "failed",
-      error: runFailed
-        ? "The run failed, and the reply couldn't be posted to Slack either."
-        : "The reply couldn't be posted to Slack.",
-      events: [{ type: "error", role: "system", body: "The reply couldn't be posted to Slack." }],
+      status: "stopped",
+      events: [{ type: "note", role: "system", body: text }],
     });
   }
+}
+
+/** What woke the agent up, kept so a resumed run can rebuild the same prompt. */
+function buildTrigger(event: SlackMessageEvent, addressed: boolean): TriggerContext {
+  return {
+    description: describeTrigger(event, addressed),
+    facts: [
+      `The person who wrote to you is <@${event.user ?? "unknown"}>.`,
+      "Your answer is posted in the thread, so keep it to what fits in a chat message.",
+    ],
+    mayStaySilent: !addressed,
+  };
 }
 
 /** One line for the prompt about what woke the agent up. */
@@ -287,6 +400,56 @@ function sessionTitle(event: SlackMessageEvent, addressed: boolean) {
   if (event.channel_type === "im") return "Direct message";
   if (addressed) return "Mentioned in a channel";
   return "Followed up in a thread";
+}
+
+/**
+ * Posts (or edits) the thread's reply and closes out the session. Shared by
+ * a run that finished outright and one that's coming back from a pause —
+ * both end the same way, one message and a closed session.
+ */
+async function finishRun(
+  sessionId: string,
+  botToken: string,
+  reply: SlackReplyContext,
+  text: string,
+  runFailed: boolean,
+  status: "done" | "failed" | "stopped" = runFailed ? "failed" : "done",
+) {
+  try {
+    if (reply.progressTs) {
+      // Replaces the progress message with the answer, rather than leaving
+      // the tool trail behind it — the trail was for watching the run happen,
+      // not a record anyone needs once it's done. The full trail still lives
+      // in the session's transcript for whoever wants it.
+      await updateReply({ botToken, channel: reply.channel, ts: reply.progressTs, text: toMrkdwn(text) });
+    } else {
+      await replyInThread({
+        botToken,
+        channel: reply.channel,
+        ts: reply.eventTs,
+        threadTs: reply.threadTs,
+        text: toMrkdwn(text),
+      });
+    }
+    await finishSession(sessionId, {
+      status,
+      error: runFailed ? "The run failed before it could answer." : null,
+      events: [{ type: "reply", role: "agent", body: text }],
+    });
+  } catch (error) {
+    // The last place a message can vanish: the run worked, the answer exists,
+    // and Slack refused to post it — a missing `chat:write`, or a channel the
+    // app was never added to.
+    console.error("Could not post the reply to Slack", error);
+    log("reply failed", { channel: reply.channel, error });
+    await finishSession(sessionId, {
+      status: "failed",
+      error: runFailed
+        ? "The run failed, and the reply couldn't be posted to Slack either."
+        : "The reply couldn't be posted to Slack.",
+      events: [{ type: "error", role: "system", body: "The reply couldn't be posted to Slack." }],
+    });
+  }
 }
 
 /**

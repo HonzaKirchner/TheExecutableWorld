@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
 import { requireAgent } from "@/app/app/require-agent";
-import type { Agent } from "@/lib/agents";
+import { setAuditSettings, type Agent } from "@/lib/agents";
 import {
   connectionBlocker,
   CUSTOM_SERVER_NAME_MAX,
@@ -25,6 +25,7 @@ import {
   saveToolAccess,
   syncTools,
   upsertConnection,
+  type ClassifierSettings,
   type McpConnection,
 } from "@/lib/mcp/connections";
 import { suggestApproval } from "@/lib/mcp/tools";
@@ -254,6 +255,24 @@ export async function saveToolAccessAction(
   const allowed = strings(formData.getAll("allowed")).filter((name) => known.has(name));
   const approval = strings(formData.getAll("approval")).filter((name) => known.has(name));
 
+  // A classifier only makes sense for a tool that's gated, so the form only
+  // sends these for names in `approval` — read for exactly those.
+  const classifierOn = new Set(
+    strings(formData.getAll("classifierEnabled")).filter((name) => known.has(name)),
+  );
+  const classifiers = new Map<string, ClassifierSettings>(
+    approval.map((name) => [
+      name,
+      {
+        enabled: classifierOn.has(name),
+        systemPrompt: strOrNull(formData.get(`classifierPrompt:${name}`)),
+        context: strOrNull(formData.get(`classifierContext:${name}`)),
+        autoApproveWhen: strOrNull(formData.get(`classifierAutoApprove:${name}`)),
+        escalateWhen: strOrNull(formData.get(`classifierEscalate:${name}`)),
+      },
+    ]),
+  );
+
   if (serverId === "slack") {
     try {
       await syncSlackManifest(agent, { tools: allowed });
@@ -262,7 +281,42 @@ export async function saveToolAccessAction(
     }
   }
 
-  await saveToolAccess(connection.id, allowed, approval);
+  await saveToolAccess(connection.id, allowed, approval, classifiers);
+  revalidatePath(`/app/${agent.id}`);
+  redirect(`/app/${agent.id}`);
+}
+
+/**
+ * Where the agent's tool-approval requests go, and who may decide them. A
+ * blank whitelist means anyone in the channel can — the channel membership is
+ * the access control until someone asks for narrower.
+ */
+export async function saveAuditSettingsAction(
+  _previous: AccessActionState,
+  formData: FormData,
+): Promise<AccessActionState> {
+  const agent = await requireAgent(formData);
+  if ("error" in agent) return agent;
+
+  const channelId = str(formData.get("auditChannelId")) || null;
+  const whitelist = str(formData.get("approvalWhitelist"))
+    .split(/[\s,]+/)
+    .map((id) => id.trim())
+    .filter(Boolean);
+
+  await setAuditSettings(agent.id, { channelId, whitelist });
+
+  // Turns Slack interactivity on for the app the first time a channel is set
+  // — without this, the buttons on an approval message would have nowhere
+  // to be delivered to until something else happened to sync the manifest.
+  if (channelId) {
+    try {
+      await syncSlackManifest(agent);
+    } catch (error) {
+      return { error: slackManifestFailure(error) };
+    }
+  }
+
   revalidatePath(`/app/${agent.id}`);
   redirect(`/app/${agent.id}`);
 }
@@ -304,6 +358,11 @@ function connectionFailureMessage(serverName: string, error: unknown) {
 
 function str(value: FormDataEntryValue | null) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function strOrNull(value: FormDataEntryValue | null) {
+  const trimmed = str(value);
+  return trimmed || null;
 }
 
 function strings(values: FormDataEntryValue[]) {

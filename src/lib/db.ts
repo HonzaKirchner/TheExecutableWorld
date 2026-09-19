@@ -142,6 +142,15 @@ async function createSchema() {
       add column if not exists slack_bot_scopes text[]
   `;
 
+  // Where an agent's tool-approval requests go, and who may decide them. An
+  // empty (null) whitelist means anyone in the channel can — the channel
+  // itself is the access control until someone asks for narrower.
+  await sql`
+    alter table agents
+      add column if not exists audit_channel_id   text,
+      add column if not exists approval_whitelist  text[]
+  `;
+
   // One row per (agent, MCP server) the agent has been pointed at. Everything
   // the OAuth client needs to come back later lives here: the registered
   // client, the token pair, the PKCE verifier and `state` of an authorization
@@ -211,6 +220,19 @@ async function createSchema() {
       requires_approval  boolean not null default true,
       primary key (connection_id, name)
     )
+  `;
+
+  // A tool that needs approval can also be handed a classifier: Jev decides,
+  // per call, whether it's obviously fine (the run goes ahead) or worth a
+  // person's attention (it pauses as usual). Off by default — a tool starts
+  // out needing a person every time, same as before this existed.
+  await sql`
+    alter table mcp_tools
+      add column if not exists classifier_enabled       boolean not null default false,
+      add column if not exists classifier_system_prompt  text,
+      add column if not exists classifier_context        text,
+      add column if not exists classifier_auto_approve   text,
+      add column if not exists classifier_escalate       text
   `;
 
   // What makes an agent act. One row per (agent, kind); the row's id is the
@@ -433,5 +455,55 @@ async function createSchema() {
       created_at  timestamptz not null default now(),
       primary key (session_id, seq)
     )
+  `;
+
+  // A run that's waiting on a human. `resume_messages` is the full
+  // conversation up to and including the assistant turn that asked for the
+  // gated tool call — the AI SDK's own shape, kept opaque here — so resuming
+  // is just handing it back with the decisions appended and calling the model
+  // again. `trigger_context` and `reply_context` are what the trigger-specific
+  // code (Slack, Stripe, …) needs to pick the run back up and, if there's
+  // somewhere to answer, finish it the same way it would have the first time.
+  // One row per session: a session is one run, and a run pauses at one place
+  // at a time.
+  await sql`
+    create table if not exists agent_pauses (
+      session_id       uuid primary key references agent_sessions (id) on delete cascade,
+      agent_id         uuid not null references agents (id) on delete cascade,
+      resume_messages  jsonb not null,
+      trigger_kind     text not null,
+      trigger_context  jsonb not null default '{}'::jsonb,
+      reply_context    jsonb,
+      created_at       timestamptz not null default now()
+    )
+  `;
+
+  // One row per tool call a run stopped for. Several can belong to the same
+  // pause (the model asked for more than one gated tool in the same step);
+  // the run resumes once every row for its session has a decision.
+  await sql`
+    create table if not exists tool_approvals (
+      id                  uuid primary key default gen_random_uuid(),
+      session_id          uuid not null references agent_sessions (id) on delete cascade,
+      agent_id            uuid not null references agents (id) on delete cascade,
+      approval_id         text not null,
+      tool_call_id        text not null,
+      tool_name           text not null,
+      server_name         text not null,
+      arguments           jsonb not null default '{}'::jsonb,
+      classifier_verdict  text,
+      classifier_reason   text,
+      status              text not null default 'pending',
+      decided_by          text,
+      decided_by_name     text,
+      note                text,
+      slack_channel       text,
+      slack_message_ts    text,
+      created_at          timestamptz not null default now(),
+      decided_at          timestamptz
+    )
+  `;
+  await sql`
+    create index if not exists tool_approvals_session_idx on tool_approvals (session_id)
   `;
 }

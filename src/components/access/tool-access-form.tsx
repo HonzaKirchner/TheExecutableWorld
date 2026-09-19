@@ -2,7 +2,7 @@
 
 import { useActionState, useId, useMemo, useState } from "react";
 import Link from "next/link";
-import { Loader2, Search, ShieldCheck } from "lucide-react";
+import { Loader2, Search, ShieldCheck, Sparkles } from "lucide-react";
 
 import {
   saveToolAccessAction,
@@ -14,9 +14,19 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 
-type Choice = { allowed: boolean; requiresApproval: boolean };
+type Choice = {
+  allowed: boolean;
+  requiresApproval: boolean;
+  classifierEnabled: boolean;
+  classifierSystemPrompt: string;
+  classifierContext: string;
+  classifierAutoApprove: string;
+  classifierEscalate: string;
+};
 
 export function ToolAccessForm({
   agentId,
@@ -40,7 +50,15 @@ export function ToolAccessForm({
     Object.fromEntries(
       tools.map((tool) => [
         tool.name,
-        { allowed: tool.allowed, requiresApproval: tool.requiresApproval },
+        {
+          allowed: tool.allowed,
+          requiresApproval: tool.requiresApproval,
+          classifierEnabled: tool.classifierEnabled,
+          classifierSystemPrompt: tool.classifierSystemPrompt ?? "",
+          classifierContext: tool.classifierContext ?? "",
+          classifierAutoApprove: tool.classifierAutoApprove ?? "",
+          classifierEscalate: tool.classifierEscalate ?? "",
+        },
       ]),
     ),
   );
@@ -87,7 +105,32 @@ export function ToolAccessForm({
           <span key={tool.name} hidden>
             <input type="hidden" name="allowed" value={tool.name} />
             {choice.requiresApproval ? (
-              <input type="hidden" name="approval" value={tool.name} />
+              <>
+                <input type="hidden" name="approval" value={tool.name} />
+                {choice.classifierEnabled ? (
+                  <input type="hidden" name="classifierEnabled" value={tool.name} />
+                ) : null}
+                <input
+                  type="hidden"
+                  name={`classifierPrompt:${tool.name}`}
+                  value={choice.classifierSystemPrompt}
+                />
+                <input
+                  type="hidden"
+                  name={`classifierContext:${tool.name}`}
+                  value={choice.classifierContext}
+                />
+                <input
+                  type="hidden"
+                  name={`classifierAutoApprove:${tool.name}`}
+                  value={choice.classifierAutoApprove}
+                />
+                <input
+                  type="hidden"
+                  name={`classifierEscalate:${tool.name}`}
+                  value={choice.classifierEscalate}
+                />
+              </>
             ) : null}
           </span>
         );
@@ -191,51 +234,154 @@ function ToolRow({
   const checkboxId = useId();
   const switchId = useId();
   const title = tool.title && tool.title !== tool.name ? tool.title : null;
+  const gated = choice.allowed && choice.requiresApproval;
 
   return (
     <li
       data-allowed={choice.allowed}
-      className="flex items-start gap-4 px-5 py-4 transition-colors data-[allowed=false]:bg-muted/30"
+      className="px-5 py-4 transition-colors data-[allowed=false]:bg-muted/30"
     >
-      <Checkbox
-        id={checkboxId}
-        checked={choice.allowed}
-        onCheckedChange={(checked) => onChange({ allowed: checked === true })}
-        className="mt-1"
-      />
-      <label htmlFor={checkboxId} className="min-w-0 flex-1 cursor-pointer">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="font-medium">{title ?? tool.name}</span>
-          {title ? (
-            <span className="font-mono text-xs text-muted-foreground">{tool.name}</span>
-          ) : null}
-          {toolTraits(tool.annotations).map((trait) => (
-            <TraitBadge key={trait} trait={trait} />
-          ))}
-        </div>
-        {tool.description ? (
-          <p className="mt-1 line-clamp-2 text-sm text-muted-foreground" title={tool.description}>
-            {tool.description}
-          </p>
-        ) : null}
-      </label>
-      <div className="flex shrink-0 items-center gap-2 pt-0.5">
-        <label
-          htmlFor={switchId}
-          className={`text-xs transition-colors ${
-            choice.allowed ? "text-muted-foreground" : "text-muted-foreground/40"
-          }`}
-        >
-          Needs approval
-        </label>
-        <Switch
-          id={switchId}
-          checked={choice.requiresApproval}
-          disabled={!choice.allowed}
-          onCheckedChange={(checked) => onChange({ requiresApproval: checked })}
+      <div className="flex items-start gap-4">
+        <Checkbox
+          id={checkboxId}
+          checked={choice.allowed}
+          onCheckedChange={(checked) => onChange({ allowed: checked === true })}
+          className="mt-1"
         />
+        <label htmlFor={checkboxId} className="min-w-0 flex-1 cursor-pointer">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="font-medium">{title ?? tool.name}</span>
+            {title ? (
+              <span className="font-mono text-xs text-muted-foreground">{tool.name}</span>
+            ) : null}
+            {toolTraits(tool.annotations).map((trait) => (
+              <TraitBadge key={trait} trait={trait} />
+            ))}
+          </div>
+          {tool.description ? (
+            <p className="mt-1 line-clamp-2 text-sm text-muted-foreground" title={tool.description}>
+              {tool.description}
+            </p>
+          ) : null}
+        </label>
+        <div className="flex shrink-0 items-center gap-2 pt-0.5">
+          <label
+            htmlFor={switchId}
+            className={`text-xs transition-colors ${
+              choice.allowed ? "text-muted-foreground" : "text-muted-foreground/40"
+            }`}
+          >
+            Needs approval
+          </label>
+          <Switch
+            id={switchId}
+            checked={choice.requiresApproval}
+            disabled={!choice.allowed}
+            onCheckedChange={(checked) => onChange({ requiresApproval: checked })}
+          />
+        </div>
       </div>
+
+      {gated ? <ClassifierPanel choice={choice} onChange={onChange} /> : null}
     </li>
+  );
+}
+
+/**
+ * A gated tool's classifier: off by default, so every call still goes to a
+ * person. Turning it on hands Jev the call first — an `auto_approve` verdict
+ * skips the person entirely, anything else falls back to one, same as today.
+ */
+function ClassifierPanel({
+  choice,
+  onChange,
+}: {
+  choice: Choice;
+  onChange: (patch: Partial<Choice>) => void;
+}) {
+  const toggleId = useId();
+  const promptId = useId();
+  const contextId = useId();
+  const autoApproveId = useId();
+  const escalateId = useId();
+
+  return (
+    <div className="mt-3 ml-9 rounded-lg border border-dashed p-3">
+      <div className="flex items-center gap-2">
+        <Switch
+          id={toggleId}
+          checked={choice.classifierEnabled}
+          onCheckedChange={(checked) => onChange({ classifierEnabled: checked })}
+        />
+        <Label htmlFor={toggleId} className="flex items-center gap-1.5 text-sm font-normal">
+          <Sparkles className="size-3.5 text-muted-foreground" />
+          Let Jev auto-approve some calls
+        </Label>
+      </div>
+
+      {choice.classifierEnabled ? (
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <Field
+            id={promptId}
+            label="System prompt"
+            value={choice.classifierSystemPrompt}
+            onChange={(value) => onChange({ classifierSystemPrompt: value })}
+            placeholder="How Jev should think about this tool."
+          />
+          <Field
+            id={contextId}
+            label="About this tool"
+            value={choice.classifierContext}
+            onChange={(value) => onChange({ classifierContext: value })}
+            placeholder="What it does, and why it usually needs a person."
+          />
+          <Field
+            id={autoApproveId}
+            label="Auto-approve when"
+            value={choice.classifierAutoApprove}
+            onChange={(value) => onChange({ classifierAutoApprove: value })}
+            placeholder="e.g. the amount is under $50"
+          />
+          <Field
+            id={escalateId}
+            label="Escalate to a person when"
+            value={choice.classifierEscalate}
+            onChange={(value) => onChange({ classifierEscalate: value })}
+            placeholder="e.g. anything involving a refund"
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function Field({
+  id,
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+}) {
+  return (
+    <div className="space-y-1">
+      <Label htmlFor={id} className="text-xs text-muted-foreground">
+        {label}
+      </Label>
+      <Textarea
+        id={id}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        rows={2}
+        className="text-sm"
+      />
+    </div>
   );
 }
 

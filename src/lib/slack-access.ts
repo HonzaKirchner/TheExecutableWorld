@@ -1,4 +1,5 @@
 import { getAgentBotToken, type Agent } from "@/lib/agents";
+import { publicBaseUrl } from "@/lib/base-url";
 import { getMcpServer } from "@/lib/mcp/catalog";
 import {
   getConnection,
@@ -59,6 +60,10 @@ export async function manifestInputFor(
       ? { eventsUrl: slackEventsUrl(trigger.id), events: trigger.events }
       : undefined,
     tools,
+    // Approvals belong to the agent's app itself, not to any one trigger, so
+    // this is set as soon as the agent exists — before the app is created,
+    // there is no agent id to build it from (see `createSlackApp`'s caller).
+    interactivityUrl: `${publicBaseUrl()}/api/slack/interactions/${agent.id}`,
   };
 }
 

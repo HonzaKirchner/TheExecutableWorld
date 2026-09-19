@@ -1,6 +1,7 @@
-import { generateText, stepCountIs, type ModelMessage } from "ai";
+import { generateText, stepCountIs, type ModelMessage, type ToolApprovalStatus } from "ai";
 
 import type { Agent } from "@/lib/agents";
+import { classifyToolCall, hasClassifier } from "@/lib/agent/classifier";
 import { buildInstructions, type TriggerContext } from "@/lib/agent/prompt";
 import { MissingApiKeyError, resolveModel } from "@/lib/agent/providers";
 import { loadAgentTools, type ToolLabel } from "@/lib/agent/tools";
@@ -26,6 +27,38 @@ export type AgentRun = {
   toolCalls: { name: string; ok: boolean }[];
 };
 
+/** A gated tool call the model made that a person now has to decide on. */
+export type PendingApproval = {
+  approvalId: string;
+  toolCallId: string;
+  /** Qualified name — `serverId__toolName`, as the model sees it. */
+  toolName: string;
+  serverName: string;
+  title?: string;
+  args: unknown;
+  /** The classifier's note, if a classifier looked at this call first. */
+  reason?: string;
+};
+
+/**
+ * What a run comes back with: either it's done, same as always, or it
+ * stopped at a gated tool call and is waiting on a person. `resumeMessages`
+ * is the whole conversation so far, in the shape the model needs back —
+ * opaque to every caller but `continueAgentRun`, which is the only thing
+ * that ever reads it again.
+ */
+export type RunOutcome =
+  | ({ status: "done" } & AgentRun)
+  | { status: "paused"; approvals: PendingApproval[]; resumeMessages: ModelMessage[] };
+
+/** A person's decision on one gated tool call, ready to hand back to the model. */
+export type ApprovalDecision = {
+  approvalId: string;
+  approved: boolean;
+  /** Why — shown to the model when denied, so it can explain itself. */
+  reason?: string;
+};
+
 /**
  * One thing worth telling a person watching the run live: a tool was called,
  * or it came back. Nothing about the model's own thinking is reported — there
@@ -43,9 +76,14 @@ export type RunProgress =
  * the end.
  */
 export type AgentRunEvent = {
-  type: "tool_call" | "tool_result";
+  type: "tool_call" | "tool_result" | "note";
   body: string;
   data?: Record<string, unknown>;
+};
+
+type RunCallbacks = {
+  onProgress?: (event: RunProgress) => void;
+  onEvent?: (event: AgentRunEvent) => void;
 };
 
 /** A human name for a tool call — the server it belongs to, not its arguments. */
@@ -56,30 +94,97 @@ function labelFor(labels: Record<string, ToolLabel>, toolName: string) {
 }
 
 /**
- * Runs the agent once and returns what it wants to say.
+ * Runs the agent once and returns what it wants to say — or, if it called a
+ * gated tool, hands back what a caller needs to ask a person and pick the run
+ * back up later with `continueAgentRun`.
  *
  * This is the whole harness: every trigger builds `messages`, calls this, and
  * decides what to do with the answer. Nothing in here knows about Slack or
  * Stripe, and nothing here writes anywhere — delivery is the caller's job.
- *
- * Two independent, optional callbacks report the same tool calls as they
- * happen, to two different kinds of caller: `onProgress` is for showing the
- * run live somewhere transient (a Slack message that updates in place),
- * `onEvent` is for writing it down somewhere durable (a session's
- * transcript). Neither knows the other exists. Both are best-effort — a throw
- * from either must not take the run down, since by then the model has
- * already made the call.
  */
 export async function runAgent(input: {
   agent: Agent;
   trigger: TriggerContext;
   messages: ModelMessage[];
-  /** Called as tools are used, so a caller can show the run happening live. */
-  onProgress?: (event: RunProgress) => void;
-  onEvent?: (event: AgentRunEvent) => void;
-}): Promise<AgentRun> {
-  const model = resolveModel(input.agent.model);
+  onProgress?: RunCallbacks["onProgress"];
+  onEvent?: RunCallbacks["onEvent"];
+}): Promise<RunOutcome> {
   const tools = await loadAgentTools(input.agent.id);
+  try {
+    return await execute({
+      agent: input.agent,
+      trigger: input.trigger,
+      tools,
+      messages: input.messages,
+      onProgress: input.onProgress,
+      onEvent: input.onEvent,
+    });
+  } finally {
+    await tools.close();
+  }
+}
+
+/**
+ * Picks a paused run back up: `messages` is the pause's `resumeMessages` with
+ * the person's decisions appended as a `tool-approval-response` message,
+ * which the AI SDK matches back to the pending request by `approvalId`.
+ *
+ * Loads tools fresh rather than reusing whatever set the original call built
+ * — access may have changed while the run was waiting, and the new decision
+ * should see the current configuration, not a stale one held open across an
+ * approval that could take hours.
+ */
+export async function continueAgentRun(input: {
+  agent: Agent;
+  trigger: TriggerContext;
+  messages: ModelMessage[];
+  decisions: ApprovalDecision[];
+  onProgress?: RunCallbacks["onProgress"];
+  onEvent?: RunCallbacks["onEvent"];
+}): Promise<RunOutcome> {
+  const tools = await loadAgentTools(input.agent.id);
+  try {
+    const messages: ModelMessage[] = [
+      ...input.messages,
+      {
+        role: "tool",
+        content: input.decisions.map((decision) => ({
+          type: "tool-approval-response" as const,
+          approvalId: decision.approvalId,
+          approved: decision.approved,
+          reason: decision.reason,
+        })),
+      },
+    ];
+    return await execute({
+      agent: input.agent,
+      trigger: input.trigger,
+      tools,
+      messages,
+      onProgress: input.onProgress,
+      onEvent: input.onEvent,
+    });
+  } finally {
+    await tools.close();
+  }
+}
+
+/**
+ * The one place that calls the model. Shared by a fresh run and a resumed
+ * one — both are "call the model with this conversation and see what it
+ * does", and a resumed run can pause again just as easily as the first call
+ * did, if it reaches for another gated tool further down the line.
+ */
+async function execute(input: {
+  agent: Agent;
+  trigger: TriggerContext;
+  tools: Awaited<ReturnType<typeof loadAgentTools>>;
+  messages: ModelMessage[];
+  onProgress?: RunCallbacks["onProgress"];
+  onEvent?: RunCallbacks["onEvent"];
+}): Promise<RunOutcome> {
+  const model = resolveModel(input.agent.model);
+  const { tools } = input;
 
   log("starting", {
     agent: input.agent.handle,
@@ -87,9 +192,6 @@ export async function runAgent(input: {
     trigger: input.trigger.description,
     messages: input.messages.length,
     tools: Object.keys(tools.toolSet).join(",") || "none",
-    // A tool the agent expected to have and doesn't is a common reason for an
-    // answer that says less than it should.
-    withheld: tools.withheld.map((tool) => tool.name).join(",") || "none",
     unreachable:
       tools.unreachable.map((server) => `${server.serverName}(${server.error})`).join(",") ||
       "none",
@@ -105,6 +207,22 @@ export async function runAgent(input: {
       }),
       messages: input.messages,
       tools: tools.toolSet,
+      toolApproval: async ({ toolCall }): Promise<ToolApprovalStatus> => {
+        const gate = tools.approvals[toolCall.toolName];
+        if (!gate) return { type: "not-applicable" };
+        if (!gate.classifierEnabled || !hasClassifier(gate.classifier)) {
+          return { type: "user-approval" };
+        }
+        const verdict = await classifyToolCall({
+          config: gate.classifier,
+          serverName: gate.serverName,
+          toolName: gate.toolName,
+          args: toolCall.input,
+        });
+        return verdict.decision === "auto_approve"
+          ? { type: "approved", reason: verdict.reason }
+          : { type: "user-approval", reason: verdict.reason };
+      },
       stopWhen: stepCountIs(MAX_STEPS),
       timeout: TIMEOUT_MS,
       onToolExecutionStart: ({ callId, toolCall }) => {
@@ -156,6 +274,28 @@ export async function runAgent(input: {
       },
     });
 
+    reportAutomaticApprovals(result.steps, tools.labels, input.onEvent);
+
+    const pending = pendingApprovals(result.steps, tools.labels);
+    if (pending.length > 0) {
+      log("paused", {
+        agent: input.agent.handle,
+        approvals: pending.map((approval) => approval.toolName).join(","),
+      });
+      notify(input.onEvent, {
+        type: "note",
+        body: pending.length === 1
+          ? `Paused: ${labelFor(tools.labels, pending[0].toolName)} needs a person's approval.`
+          : `Paused: ${pending.length} tool calls need a person's approval.`,
+        data: { approvals: pending.map((approval) => approval.toolName) },
+      });
+      return {
+        status: "paused",
+        approvals: pending,
+        resumeMessages: [...input.messages, ...result.response.messages],
+      };
+    }
+
     log("finished", {
       agent: input.agent.handle,
       steps: result.steps.length,
@@ -167,6 +307,7 @@ export async function runAgent(input: {
     });
 
     return {
+      status: "done",
       text: result.text.trim(),
       steps: result.steps.length,
       toolCalls: result.steps.flatMap((step) => {
@@ -186,8 +327,74 @@ export async function runAgent(input: {
   } catch (error) {
     log("failed", { agent: input.agent.handle, error });
     throw error;
-  } finally {
-    await tools.close();
+  }
+}
+
+/**
+ * The gated tool calls this call's last step is waiting on — the loop stops
+ * itself the moment one comes up, so there is never more than one step's
+ * worth to look at.
+ */
+function pendingApprovals(
+  steps: readonly { content: readonly { type: string }[] }[],
+  labels: Record<string, ToolLabel>,
+): PendingApproval[] {
+  const lastStep = steps.at(-1);
+  if (!lastStep) return [];
+
+  const approvals: PendingApproval[] = [];
+  for (const raw of lastStep.content) {
+    // Not part of the discriminated `ContentPart` union in every SDK version
+    // this file has to compile against, so read it structurally instead.
+    const part = raw as {
+      type: string;
+      isAutomatic?: boolean;
+      approvalId?: string;
+      reason?: string;
+      toolCall?: { toolCallId: string; toolName: string; input: unknown };
+    };
+    if (part.type !== "tool-approval-request" || part.isAutomatic || !part.toolCall || !part.approvalId) {
+      continue;
+    }
+    approvals.push({
+      approvalId: part.approvalId,
+      toolCallId: part.toolCall.toolCallId,
+      toolName: part.toolCall.toolName,
+      serverName: labels[part.toolCall.toolName]?.serverName ?? part.toolCall.toolName,
+      title: labels[part.toolCall.toolName]?.title,
+      args: part.toolCall.input,
+      reason: part.reason,
+    });
+  }
+  return approvals;
+}
+
+/**
+ * A classifier's `auto_approve` doesn't pause the run, but it's still worth a
+ * line in the transcript — otherwise a gated tool that "just ran" reads no
+ * differently from one that never needed approval at all.
+ */
+function reportAutomaticApprovals(
+  steps: readonly { content: readonly { type: string }[] }[],
+  labels: Record<string, ToolLabel>,
+  onEvent: RunCallbacks["onEvent"],
+) {
+  if (!onEvent) return;
+  for (const step of steps) {
+    for (const raw of step.content) {
+      const part = raw as {
+        type: string;
+        isAutomatic?: boolean;
+        reason?: string;
+        toolCall?: { toolName: string };
+      };
+      if (part.type !== "tool-approval-request" || !part.isAutomatic || !part.toolCall) continue;
+      notify(onEvent, {
+        type: "note",
+        body: `Auto-approved: ${labelFor(labels, part.toolCall.toolName)}`,
+        data: { tool: part.toolCall.toolName, reason: part.reason ?? null },
+      });
+    }
   }
 }
 

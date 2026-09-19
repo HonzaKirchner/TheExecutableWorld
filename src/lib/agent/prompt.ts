@@ -40,7 +40,7 @@ export function isSilence(text: string) {
 export function buildInstructions(input: {
   agent: Agent;
   trigger: TriggerContext;
-  tools: Pick<AgentTools, "withheld" | "unreachable">;
+  tools: Pick<AgentTools, "unreachable">;
 }): string {
   const { agent, trigger, tools } = input;
   const sections: string[] = [];
@@ -84,11 +84,6 @@ export function buildInstructions(input: {
   // Only worth saying when something is off. A list of tools the model can
   // already see in its tool definitions would just be noise.
   const caveats: string[] = [];
-  for (const tool of tools.withheld) {
-    caveats.push(
-      `\`${tool.name}\` (${tool.serverName}) needs a person's approval before it can run, and there is no way to ask yet — treat it as unavailable.`,
-    );
-  }
   for (const server of tools.unreachable) {
     caveats.push(`${server.serverName} could not be reached (${server.error}).`);
   }

@@ -35,6 +35,12 @@ export type ManifestInput = {
   };
   /** Names of the Slack tools the agent may call; their scopes are asked for too. */
   tools: readonly string[];
+  /**
+   * Where Slack sends button clicks and modal submissions — the approval
+   * flow's own request URL, separate from events. Undefined before the agent
+   * has an id to build it from (see `createSlackApp`'s caller).
+   */
+  interactivityUrl?: string;
 };
 
 /**
@@ -96,7 +102,13 @@ export async function updateSlackApp(
   });
 }
 
-export function buildManifest({ handle, description, subscription, tools }: ManifestInput) {
+export function buildManifest({
+  handle,
+  description,
+  subscription,
+  tools,
+  interactivityUrl,
+}: ManifestInput) {
   const bot_events = subscription ? normalizeSlackEvents(subscription.events) : [];
   return {
     display_information: {
@@ -116,6 +128,9 @@ export function buildManifest({ handle, description, subscription, tools }: Mani
         messages_tab_enabled: true,
         messages_tab_read_only_enabled: false,
       },
+      ...(interactivityUrl
+        ? { interactivity: { is_enabled: true, request_url: interactivityUrl } }
+        : {}),
     },
     oauth_config: {
       scopes: { bot: botScopesFor(bot_events, tools) },

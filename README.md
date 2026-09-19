@@ -16,6 +16,7 @@ Next.js (App Router) + Tailwind v4 + shadcn/ui, with Slack sign-in via Auth.js. 
 | `/api/mcp/slack`                     | The Slack MCP server this app hosts — tools that act as an agent's own Slack app |
 | `/api/slack/install/callback`        | Where Slack sends people back to after installing an agent     |
 | `/api/slack/events/[triggerId]`      | Where Slack delivers an agent's events (mentions, DMs)         |
+| `/api/slack/interactions/[agentId]`  | Where Slack delivers approval button clicks and the decline modal |
 | `/app/[agentId]/triggers/[kind]`     | A trigger's detail: connect (Stripe, once per workspace), choose events |
 | `/api/stripe/connect/callback`       | Where Stripe Connect sends people back to                      |
 | `/api/stripe/events`                 | The platform's Connect webhook — events from every connected Stripe account |
@@ -45,6 +46,7 @@ Everything under `/app` is gated by [src/proxy.ts](src/proxy.ts); signed-out vis
    | `STRIPE_INSTALL_LINK`  | An install link copied from the Stripe App's External test tab (test mode), used verbatim | for Stripe triggers |
    | `STRIPE_CLIENT_ID`     | Only as a fallback for a published app without `STRIPE_INSTALL_LINK` | optional |
    | `OPENAI_API_KEY`       | platform.openai.com → API keys — without it agents can't answer | to run agents |
+   | `TYPESAFE_API_KEY`     | typesafe.ai — lets a gated tool's classifier ask Jev whether a call is safe to auto-approve. Without it, every classifier falls back to escalating to a person | for tool-call classifiers |
    | `GITHUB_MCP_CLIENT_ID` / `GITHUB_MCP_CLIENT_SECRET` | A GitHub App (or OAuth App) with `<base URL>/api/mcp/callback` as its callback URL. GitHub's MCP server doesn't register clients dynamically, so without these the GitHub card can't connect | for GitHub access |
    | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | A Google Cloud OAuth client (web application) in a project with the Gmail API enabled, with `<base URL>/api/mcp/callback` among its redirect URIs | for Gmail access and triggers |
    | `GMAIL_PUBSUB_TOPIC` | A Pub/Sub topic, `projects/<project>/topics/<topic>`, that `gmail-api-push@system.gserviceaccount.com` may publish to | for Gmail triggers |

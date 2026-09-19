@@ -12,6 +12,7 @@ import { missingScopes } from "@/lib/slack-events-catalog";
 import { getStripeConnection } from "@/lib/stripe-connections";
 import { listTriggers } from "@/lib/triggers";
 import { AccessSection } from "@/components/access/access-section";
+import { AuditSettingsForm } from "@/components/access/audit-settings-form";
 import { InstallSlackPanel } from "@/components/access/install-slack-panel";
 import { FlashToast } from "@/components/flash-toast";
 import { SessionsSection } from "@/components/sessions/sessions-section";
@@ -158,6 +159,8 @@ export default async function AgentDetailPage({
       ) : null}
 
       <AccessSection agent={agent} connections={connections} />
+
+      <AuditSettingsForm agent={agent} />
 
       <InstallSlackPanel agent={agent} missingScopes={missing} listening={Boolean(slackTrigger)} />
     </div>

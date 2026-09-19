@@ -14,7 +14,7 @@ import { db, ensureSchema } from "@/lib/db";
  *    than anything derived from the agent or the event.
  */
 
-export type SessionStatus = "running" | "done" | "failed";
+export type SessionStatus = "running" | "paused" | "done" | "failed" | "stopped";
 
 /**
  * What a line of the transcript is. Only `trigger`, `message`, `reply` and
@@ -187,11 +187,29 @@ export function appendSessionEvent(sessionId: string, event: SessionEventInput) 
   return appendSessionEvents(sessionId, [event]);
 }
 
+/**
+ * Marks a session as waiting on a person, without ending it — `ended_at`
+ * stays null, since the run isn't over, just stopped for now.
+ */
+export async function pauseSession(sessionId: string, events: SessionEventInput[] = []) {
+  await appendSessionEvents(sessionId, events);
+  await ensureSchema();
+  const sql = db();
+  await sql`update agent_sessions set status = 'paused' where id = ${sessionId}`;
+}
+
+/** Picks a paused session back up — a decision came in and the run continues. */
+export async function unpauseSession(sessionId: string) {
+  await ensureSchema();
+  const sql = db();
+  await sql`update agent_sessions set status = 'running' where id = ${sessionId}`;
+}
+
 /** Closes a session, optionally with the last lines of its transcript. */
 export async function finishSession(
   sessionId: string,
   input: {
-    status: Exclude<SessionStatus, "running">;
+    status: Exclude<SessionStatus, "running" | "paused">;
     error?: string | null;
     events?: SessionEventInput[];
   },

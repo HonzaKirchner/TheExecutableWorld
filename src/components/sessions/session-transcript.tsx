@@ -43,7 +43,9 @@ export function SessionTranscript({
   const cursor = useRef(initialEvents.at(-1)?.seq ?? 0);
 
   useEffect(() => {
-    if (status !== "running") return;
+    // A paused run is still going, just waiting on a person — the view keeps
+    // polling so an approval elsewhere shows up here without a reload.
+    if (status !== "running" && status !== "paused") return;
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -70,10 +72,8 @@ export function SessionTranscript({
           idle += 1;
         }
 
-        if (data.status !== "running") {
-          setStatus(data.status);
-          return;
-        }
+        setStatus(data.status);
+        if (data.status !== "running" && data.status !== "paused") return;
       } catch {
         // A failed poll is usually a lost network, not a finished session.
         // Count it as quiet and try again a little later.
@@ -148,6 +148,15 @@ function StatusPill({
     );
   }
 
+  if (status === "paused") {
+    return (
+      <span className="flex items-center gap-2 text-xs font-medium text-amber-700 dark:text-amber-400">
+        <span className="size-2 rounded-full bg-current" />
+        Waiting for approval
+      </span>
+    );
+  }
+
   const failed = status === "failed";
   return (
     <span
@@ -156,7 +165,7 @@ function StatusPill({
       }`}
     >
       <span className="size-2 rounded-full bg-current" />
-      {failed ? "Failed" : "Finished"}
+      {failed ? "Failed" : status === "stopped" ? "Stopped" : "Finished"}
     </span>
   );
 }

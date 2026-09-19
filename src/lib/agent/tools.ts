@@ -1,5 +1,6 @@
 import { dynamicTool, jsonSchema, type JSONSchema7, type ToolSet } from "ai";
 
+import { type ClassifierConfig } from "@/lib/agent/classifier";
 import { openMcpSession, type McpSession } from "@/lib/mcp/client";
 import { listConnections, listTools } from "@/lib/mcp/connections";
 import { getMcpServer } from "@/lib/mcp/catalog";
@@ -22,17 +23,26 @@ function qualify(serverId: string, toolName: string) {
 /** Enough about a tool to name it to a person, without the argument schema. */
 export type ToolLabel = { serverName: string; toolName: string; title?: string };
 
+/**
+ * A gated tool's classifier setup, keyed by the qualified name the model
+ * sees. Only tools that need a person's approval are in here — everything
+ * else is `not-applicable` to `generateText`'s `toolApproval`, which is what
+ * a tool missing from this map means to the function built in `run.ts`.
+ */
+export type ApprovalGate = {
+  serverName: string;
+  toolName: string;
+  classifierEnabled: boolean;
+  classifier: ClassifierConfig;
+};
+
 export type AgentTools = {
   /** What to hand `generateText`. Empty when the agent has no tools. */
   toolSet: ToolSet;
   /** How to describe a tool call, keyed by the qualified name the model sees. */
   labels: Record<string, ToolLabel>;
-  /**
-   * Tools the agent is allowed to use but that a person has to approve first.
-   * There is nowhere to ask yet, so they are withheld and named in the prompt
-   * — the agent should say it can't do the thing rather than pretend it can.
-   */
-  withheld: { name: string; serverName: string }[];
+  /** Which tools need a person's approval, and how their classifier is set up. */
+  approvals: Record<string, ApprovalGate>;
   /** Servers that could not be reached. The run goes ahead without them. */
   unreachable: { serverName: string; error: string }[];
   /** Must be called when the run is over, successful or not. */
@@ -42,7 +52,7 @@ export type AgentTools = {
 const NO_TOOLS: AgentTools = {
   toolSet: {},
   labels: {},
-  withheld: [],
+  approvals: {},
   unreachable: [],
   close: async () => {},
 };
@@ -65,7 +75,7 @@ export async function loadAgentTools(agentId: string): Promise<AgentTools> {
   const sessions: McpSession[] = [];
   const toolSet: ToolSet = {};
   const labels: AgentTools["labels"] = {};
-  const withheld: AgentTools["withheld"] = [];
+  const approvals: AgentTools["approvals"] = {};
   const unreachable: AgentTools["unreachable"] = [];
 
   const close = async () => {
@@ -96,13 +106,22 @@ export async function loadAgentTools(agentId: string): Promise<AgentTools> {
         for (const tool of offered) {
           const decision = decisions.get(tool.name);
           if (!decision?.allowed) continue;
-          if (decision.requiresApproval) {
-            withheld.push({ name: tool.name, serverName });
-            continue;
-          }
 
           const qualified = qualify(connection.serverId, tool.name);
           labels[qualified] = { serverName, toolName: tool.name, title: tool.title };
+          if (decision.requiresApproval) {
+            approvals[qualified] = {
+              serverName,
+              toolName: tool.name,
+              classifierEnabled: decision.classifierEnabled,
+              classifier: {
+                systemPrompt: decision.classifierSystemPrompt,
+                context: decision.classifierContext,
+                autoApproveWhen: decision.classifierAutoApprove,
+                escalateWhen: decision.classifierEscalate,
+              },
+            };
+          }
           toolSet[qualified] = dynamicTool({
             description: toolDescription(serverName, tool.title, tool.description),
             inputSchema: jsonSchema(tool.inputSchema ?? EMPTY_SCHEMA),
@@ -121,7 +140,7 @@ export async function loadAgentTools(agentId: string): Promise<AgentTools> {
     throw error;
   }
 
-  return { toolSet, labels, withheld, unreachable, close };
+  return { toolSet, labels, approvals, unreachable, close };
 }
 
 /** For a server that declares no arguments — MCP allows it, providers don't. */

@@ -17,6 +17,10 @@ export type Agent = {
   slackInstalledAt: string | null;
   /** The bot scopes the last install granted; null until installed. */
   slackBotScopes: string[] | null;
+  /** Where a gated tool's approval requests are posted. Null: not set up yet. */
+  auditChannelId: string | null;
+  /** Slack user ids allowed to decide an approval. Empty or null: anyone can. */
+  approvalWhitelist: string[] | null;
 };
 
 type AgentRow = {
@@ -31,6 +35,8 @@ type AgentRow = {
   slack_oauth_authorize_url: string | null;
   slack_installed_at: string | null;
   slack_bot_scopes: string[] | null;
+  audit_channel_id: string | null;
+  approval_whitelist: string[] | null;
 };
 
 /**
@@ -39,7 +45,7 @@ type AgentRow = {
  * return value should be able to carry them to the client by accident.
  */
 const AGENT_COLUMNS =
-  "id, workspace_id, handle, description, instructions, model, created_at, slack_app_id, slack_oauth_authorize_url, slack_installed_at, slack_bot_scopes";
+  "id, workspace_id, handle, description, instructions, model, created_at, slack_app_id, slack_oauth_authorize_url, slack_installed_at, slack_bot_scopes, audit_channel_id, approval_whitelist";
 
 function toAgent(row: AgentRow): Agent {
   return {
@@ -54,6 +60,8 @@ function toAgent(row: AgentRow): Agent {
     slackOauthAuthorizeUrl: row.slack_oauth_authorize_url,
     slackInstalledAt: row.slack_installed_at,
     slackBotScopes: row.slack_bot_scopes,
+    auditChannelId: row.audit_channel_id,
+    approvalWhitelist: row.approval_whitelist,
   };
 }
 
@@ -310,6 +318,41 @@ export async function getAgentBotToken(agentId: string): Promise<string | null> 
     select slack_bot_token from agents where id = ${agentId} limit 1
   `) as { slack_bot_token: string | null }[];
   return decryptOptional(rows[0]?.slack_bot_token);
+}
+
+/**
+ * The signing secret, for checking that an interactive payload (a button
+ * click, a modal submission) really came from this agent's Slack app. The
+ * interactions route is keyed by agent id rather than a trigger id — unlike
+ * events, approvals aren't tied to any one trigger.
+ */
+export async function getAgentSlackSigningSecret(agentId: string): Promise<string | null> {
+  await ensureSchema();
+  const sql = db();
+  const rows = (await sql`
+    select slack_signing_secret from agents where id = ${agentId} limit 1
+  `) as { slack_signing_secret: string | null }[];
+  return decryptOptional(rows[0]?.slack_signing_secret);
+}
+
+/**
+ * Where the agent posts approval requests, and who may decide them.
+ * `whitelist` empty means anyone in the channel can — stored as null so an
+ * empty array and "never set" aren't two different states to check for.
+ */
+export async function setAuditSettings(
+  agentId: string,
+  input: { channelId: string | null; whitelist: string[] },
+) {
+  await ensureSchema();
+  const sql = db();
+  await sql`
+    update agents
+    set audit_channel_id   = ${input.channelId},
+        approval_whitelist = ${input.whitelist.length > 0 ? input.whitelist : null},
+        updated_at         = now()
+    where id = ${agentId}
+  `;
 }
 
 const UUID_RE =
