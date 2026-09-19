@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, CircleAlert, CircleCheck } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, CircleAlert, CircleCheck } from "lucide-react";
 
 import { auth } from "@/auth";
 import { getAgent } from "@/lib/agents";
 import { listConnections } from "@/lib/mcp/connections";
 import { listTriggers } from "@/lib/triggers";
 import { AccessSection } from "@/components/access/access-section";
+import { InstallSlackPanel } from "@/components/access/install-slack-panel";
 import { FlashToast } from "@/components/flash-toast";
 import { TriggersSection } from "@/components/triggers-section";
 import { Badge } from "@/components/ui/badge";
@@ -73,12 +74,6 @@ export default async function AgentDetailPage({
         ) : null}
       </div>
 
-      {agent.description ? (
-        <p className="mt-3 max-w-2xl text-sm text-muted-foreground">
-          {agent.description}
-        </p>
-      ) : null}
-
       {installed ? (
         <Notice icon={CircleCheck}>
           Installed. @{agent.handle} is now in your Slack workspace.
@@ -91,7 +86,17 @@ export default async function AgentDetailPage({
       ) : null}
       {cancelled ? <FlashToast message={cancelled} /> : null}
 
-      <dl className="mt-8 grid gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-2">
+      <section className="mt-8 overflow-hidden rounded-xl border bg-card">
+        <div className="p-6 sm:p-7">
+          <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+            Instructions
+          </h2>
+          <p className="mt-3 max-w-3xl text-[15px] leading-7 whitespace-pre-wrap">
+            {agent.description ?? "No instructions yet."}
+          </p>
+        </div>
+
+        <dl className="grid gap-px border-t bg-border sm:grid-cols-2">
         <Field label="Model" value={agent.model} mono />
         <Field
           label="Created"
@@ -106,12 +111,18 @@ export default async function AgentDetailPage({
           label="Slack app"
           value={agent.slackAppId ?? "Not created"}
           mono={Boolean(agent.slackAppId)}
+          // Slack's own configuration page for the app — scopes, event
+          // subscriptions, credentials.
+          href={agent.slackAppId ? `https://api.slack.com/apps/${agent.slackAppId}` : undefined}
         />
-      </dl>
+        </dl>
+      </section>
 
       <TriggersSection agent={agent} triggers={triggers} />
 
       <AccessSection agent={agent} connections={connections} />
+
+      <InstallSlackPanel agent={agent} />
     </div>
   );
 }
@@ -144,19 +155,32 @@ function Field({
   label,
   value,
   mono,
+  href,
 }: {
   label: string;
   value: string;
   mono?: boolean;
+  /** Makes the value a link, opened in a new tab. */
+  href?: string;
 }) {
+  const className = `mt-1 truncate text-sm ${mono ? "font-mono text-xs" : ""}`;
   return (
     <div className="bg-card px-5 py-4">
       <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd
-        className={`mt-1 truncate text-sm ${mono ? "font-mono text-xs" : ""}`}
-        title={value}
-      >
-        {value}
+      <dd className={className} title={value}>
+        {href ? (
+          <a
+            href={href}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex max-w-full items-center gap-1 underline-offset-4 transition-colors hover:text-foreground hover:underline"
+          >
+            <span className="truncate">{value}</span>
+            <ArrowUpRight className="size-3 shrink-0 text-muted-foreground" />
+          </a>
+        ) : (
+          value
+        )}
       </dd>
     </div>
   );

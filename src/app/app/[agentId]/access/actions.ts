@@ -93,8 +93,7 @@ export async function disconnectMcpServerAction(
 
 /**
  * Records which tools the agent may call and which of those need a human's
- * approval, then — if the agent isn't installed yet — sends the person to
- * Slack to install it.
+ * approval. Installing to Slack is a separate step on the agent's page.
  */
 export async function saveToolAccessAction(
   _previous: AccessActionState,
@@ -117,12 +116,10 @@ export async function saveToolAccessAction(
 
   await saveToolAccess(connection.id, allowed, approval);
   revalidatePath(`/app/${agent.id}`);
-
-  if (agent.slackInstalledAt) redirect(`/app/${agent.id}`);
-  redirect(await beginSlackInstall(agent));
+  redirect(`/app/${agent.id}`);
 }
 
-/** The install on its own, for agents that don't need any tools first. */
+/** Sends the person to Slack to install the agent's app into their workspace. */
 export async function installSlackAppAction(
   _previous: AccessActionState,
   formData: FormData,

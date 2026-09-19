@@ -12,7 +12,7 @@ import { SlackApiError } from "@/lib/slack";
 import { createSlackApp, deleteSlackApp } from "@/lib/slack-apps";
 import { createTrigger, slackEventsUrl } from "@/lib/triggers";
 
-export type CreateAgentField = "name" | "handle" | "model" | "persona";
+export type CreateAgentField = "name" | "handle" | "model" | "instructions";
 
 export type CreateAgentState = {
   status: "idle" | "error";
@@ -31,7 +31,7 @@ const NAME_MAX = 35;
 /** Slack's bot_user.display_name limit and character set. */
 const HANDLE_MAX = 80;
 const HANDLE_RE = /^[a-z0-9._-]+$/;
-const PERSONA_MAX = 4000;
+const INSTRUCTIONS_MAX = 4000;
 
 export async function createAgentAction(
   _previous: CreateAgentState,
@@ -51,9 +51,9 @@ export async function createAgentAction(
   const name = str(formData.get("name"));
   const handle = str(formData.get("handle")).replace(/^@/, "").toLowerCase();
   const model = str(formData.get("model"));
-  const persona = str(formData.get("persona"));
+  const instructions = str(formData.get("instructions"));
 
-  const values = { name, handle, model, persona };
+  const values = { name, handle, model, instructions };
   const errors: Partial<Record<CreateAgentField, string>> = {};
 
   if (!name) errors.name = "Give your coworker a name.";
@@ -68,9 +68,10 @@ export async function createAgentAction(
 
   if (!isModelId(model)) errors.model = "Choose a model.";
 
-  if (!persona) errors.persona = "Describe how this coworker should behave.";
-  else if (persona.length > PERSONA_MAX)
-    errors.persona = `Keep the persona under ${PERSONA_MAX} characters.`;
+  if (!instructions)
+    errors.instructions = "Tell your coworker what to do and how to behave.";
+  else if (instructions.length > INSTRUCTIONS_MAX)
+    errors.instructions = `Keep the instructions under ${INSTRUCTIONS_MAX} characters.`;
 
   if (Object.keys(errors).length > 0) {
     return { status: "error", errors, values };
@@ -93,7 +94,7 @@ export async function createAgentAction(
     slackApp = await createSlackApp({
       name,
       handle,
-      persona,
+      instructions,
       eventsUrl: slackEventsUrl(triggerId),
     });
   } catch (error) {
@@ -106,7 +107,7 @@ export async function createAgentAction(
       workspaceId,
       name,
       handle,
-      description: persona,
+      description: instructions,
       model,
       slackApp,
     });

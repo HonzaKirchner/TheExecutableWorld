@@ -99,7 +99,6 @@ export default async function ToolAccessPage({
           serverName={server.name}
           agentHandle={agent.handle}
           tools={tools}
-          installed={Boolean(agent.slackInstalledAt)}
         />
       )}
     </div>

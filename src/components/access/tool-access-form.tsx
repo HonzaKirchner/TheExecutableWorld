@@ -24,15 +24,12 @@ export function ToolAccessForm({
   serverName,
   agentHandle,
   tools,
-  installed,
 }: {
   agentId: string;
   serverId: string;
   serverName: string;
   agentHandle: string;
   tools: McpTool[];
-  /** Whether the agent's Slack app is already installed. */
-  installed: boolean;
 }) {
   const [state, formAction, pending] = useActionState<AccessActionState, FormData>(
     saveToolAccessAction,
@@ -166,9 +163,7 @@ export function ToolAccessForm({
 
       <div className="mt-8 flex flex-wrap items-center justify-between gap-4 border-t pt-6">
         <p className="text-xs text-muted-foreground">
-          {installed
-            ? "Changes apply the next time the agent picks a tool."
-            : `Saving opens Slack's permission screen to install @${agentHandle}.`}
+          Changes apply the next time @{agentHandle} picks a tool.
         </p>
         <div className="flex items-center gap-2">
           <Button asChild type="button" variant="ghost" disabled={pending}>
@@ -176,13 +171,7 @@ export function ToolAccessForm({
           </Button>
           <Button type="submit" disabled={pending} className="gap-2">
             {pending ? <Loader2 className="size-4 animate-spin" /> : null}
-            {pending
-              ? installed
-                ? "Saving…"
-                : "Opening Slack…"
-              : installed
-                ? "Save"
-                : "Save and install to Slack"}
+            {pending ? "Saving…" : "Save access"}
           </Button>
         </div>
       </div>

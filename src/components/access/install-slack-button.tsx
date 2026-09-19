@@ -12,10 +12,13 @@ import { Button } from "@/components/ui/button";
 export function InstallSlackButton({
   agentId,
   reinstall,
+  accent,
 }: {
   agentId: string;
   /** The app is already installed; offer to run the install again. */
   reinstall?: boolean;
+  /** The page's call to action: coloured to match the install panel. */
+  accent?: boolean;
 }) {
   const [state, formAction, pending] = useActionState<AccessActionState, FormData>(
     installSlackAppAction,
@@ -27,9 +30,14 @@ export function InstallSlackButton({
       <input type="hidden" name="agentId" value={agentId} />
       <Button
         type="submit"
+        size={accent ? "lg" : "default"}
         variant={reinstall ? "outline" : "default"}
         disabled={pending}
-        className="gap-2"
+        className={
+          accent
+            ? "gap-2 bg-violet-600 text-white shadow-sm hover:bg-violet-700 dark:bg-violet-500 dark:hover:bg-violet-400"
+            : "gap-2"
+        }
       >
         {pending ? <Loader2 className="size-4 animate-spin" /> : null}
         {pending

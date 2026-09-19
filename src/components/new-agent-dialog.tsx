@@ -76,7 +76,7 @@ function NewAgentForm() {
   const nameId = useId();
   const handleId = useId();
   const modelId = useId();
-  const personaId = useId();
+  const instructionsId = useId();
 
   return (
     <form action={formAction} className="grid gap-5">
@@ -142,20 +142,20 @@ function NewAgentForm() {
       </Field>
 
       <Field
-        id={personaId}
-        label="Persona"
-        error={state.errors?.persona}
-        hint="What they do, how they talk, what they never do."
+        id={instructionsId}
+        label="Instructions"
+        error={state.errors?.instructions}
+        hint="Their job, how they work, what they never do. This is what they'll follow."
       >
         <Textarea
-          id={personaId}
-          name="persona"
-          defaultValue={state.values?.persona}
-          placeholder="A meticulous support engineer who answers in plain language, always links the relevant doc, and escalates anything touching billing."
+          id={instructionsId}
+          name="instructions"
+          defaultValue={state.values?.instructions}
+          placeholder="You are a meticulous support engineer. Answer in plain language, always link the relevant doc, and escalate anything touching billing."
           maxLength={4000}
           required
-          className="min-h-28"
-          aria-invalid={Boolean(state.errors?.persona)}
+          className="min-h-32"
+          aria-invalid={Boolean(state.errors?.instructions)}
         />
       </Field>
 

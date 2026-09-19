@@ -44,7 +44,7 @@ export const BOT_EVENTS = ["app_mention", "message.im"];
 export async function createSlackApp(input: {
   name: string;
   handle: string;
-  persona: string;
+  instructions: string;
   /** Where Slack should deliver events — must be reachable from the internet. */
   eventsUrl: string;
 }): Promise<SlackAppCredentials> {
@@ -83,18 +83,18 @@ export async function deleteSlackApp(appId: string) {
 export function buildManifest({
   name,
   handle,
-  persona,
+  instructions,
   eventsUrl,
 }: {
   name: string;
   handle: string;
-  persona: string;
+  instructions: string;
   eventsUrl: string;
 }) {
   return {
     display_information: {
       name,
-      description: truncate(persona, DESCRIPTION_MAX),
+      description: truncate(instructions, DESCRIPTION_MAX),
     },
     features: {
       bot_user: {

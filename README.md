@@ -10,7 +10,7 @@ Next.js (App Router) + Tailwind v4 + shadcn/ui, with Slack sign-in via Auth.js. 
 | ------------------------------------ | ------------------------------------------------------------- |
 | `/`                                  | Landing page — a single "Sign in with Slack" button            |
 | `/app`                               | List of the user's agents, and the "New agent" dialog          |
-| `/app/[agentId]`                     | Agent detail, with the **Access** section (MCP servers, Slack) |
+| `/app/[agentId]`                     | Agent detail: instructions, triggers, access, install to Slack |
 | `/app/[agentId]/access/[serverId]`   | Which of a server's tools the agent may call                   |
 | `/api/mcp/callback`                  | Where MCP authorization servers send people back to            |
 | `/api/slack/install/callback`        | Where Slack sends people back to after installing an agent     |
@@ -171,8 +171,8 @@ material, which is read only by the OAuth client through `loadCredentials`.
 
 ## Creating an agent
 
-"New agent" on `/app` opens a dialog asking for a name, a Slack handle, a model and a
-persona. Submitting it runs `createAgentAction` in
+"New agent" on `/app` opens a dialog asking for a name, a Slack handle, a model and
+instructions (stored as `description`, shown first on the agent's page). Submitting it runs `createAgentAction` in
 [src/app/app/actions.ts](src/app/app/actions.ts), which:
 
 1. re-checks the session (the action is a POST endpoint of its own, reachable without
@@ -260,8 +260,7 @@ Streamable HTTP and authorizing with OAuth. Connecting one:
    **allowed** (off by default — the person picks) and **needs approval** (on unless the
    server declares the tool `readOnlyHint: true`; both are theirs to change). The list is
    refreshed from the server on every visit, keeping the decisions already made.
-4. **Save** stores the decisions. If the agent isn't installed to Slack yet it also
-   starts the install (below).
+4. **Save access** stores the decisions and returns to the agent's page.
 
 Everything the OAuth client needs later — registered client, token pair, PKCE verifier,
 discovered endpoints — lives on the connection row, because the next request may run on
@@ -277,8 +276,8 @@ regenerating the apps.
 
 ## Installing to Slack
 
-Saving tool access for a not-yet-installed agent — or **Install to Slack** on its page —
-stores a random `state` on the agent and redirects to Slack's OAuth authorize URL with the
+**Install to Slack** — the panel at the bottom of the agent's page — stores a random
+`state` on the agent and redirects to Slack's OAuth authorize URL with the
 agent's own `client_id`, the bot scopes from the manifest, and `team` set to the
 workspace. `/api/slack/install/callback` resolves the `state` back to the agent, checks
 the session is from the same workspace, exchanges the code with `oauth.v2.access` using
@@ -343,7 +342,7 @@ src/
       client.ts                 Connect, list tools, finish authorization
       tools.ts                  Approval suggestion from tool annotations
   components/
-    access/                     Access section, connect card, tool form
+    access/                     Access section, connect card, tool form, install panel
     triggers-section.tsx        Triggers section
     ui/                         shadcn/ui primitives
 ```
