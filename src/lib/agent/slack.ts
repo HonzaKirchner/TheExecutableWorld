@@ -2,7 +2,7 @@ import type { ModelMessage } from "ai";
 
 import { getAgentBotToken, getAgentById } from "@/lib/agents";
 import { deletePause, getPause, requestApprovals } from "@/lib/agent/approvals";
-import { createProgressTracker, renderProgress } from "@/lib/agent/progress";
+import { buildProgressBlocks, createProgressTracker, renderProgress } from "@/lib/agent/progress";
 import { isSilence, type TriggerContext } from "@/lib/agent/prompt";
 import { continueAgentRun, describeRunFailure, runAgent, type ApprovalDecision, type RunOutcome } from "@/lib/agent/run";
 import { debugScope, preview } from "@/lib/log";
@@ -10,6 +10,7 @@ import {
   appendSessionEvent,
   finishSession,
   pauseSession,
+  sessionUrl,
   startSession,
   unpauseSession,
 } from "@/lib/sessions";
@@ -116,11 +117,21 @@ export async function answerSlackMessage(
     }
   }
 
+  // Built once, up front, so the same turns go both to the model and into the
+  // transcript below — nothing here is more sensitive than the thread itself,
+  // which everyone in it can already read in Slack.
+  const messages = buildMessages(context, event, thread);
+
   // One session per run, with a transcript anyone holding the link can read
   // at /s/<id> — no sign-in, so only what a stranger reading over the
   // person's shoulder could already see goes in: the message and the reply,
   // never tokens or ids. `onEvent` below appends to it live, so someone
   // watching sees tool calls arrive as the run makes them, not just at the end.
+  //
+  // The triggering message carries the full thread the model actually saw as
+  // its `data`, behind the transcript's existing "Show details" disclosure —
+  // otherwise a reply that clearly used earlier thread context looks like it
+  // came out of nowhere.
   const sessionId = await startSession({
     agentId: context.agentId,
     triggerId: context.triggerId,
@@ -133,7 +144,12 @@ export async function answerSlackMessage(
         body: `Slack delivered ${event.type}.`,
         data: { event: event.type, channelType: event.channel_type ?? null, addressed },
       },
-      { type: "message", role: "user", body: event.text ?? "" },
+      {
+        type: "message",
+        role: "user",
+        body: event.text ?? "",
+        data: messages.length > 1 ? { thread: messages } : null,
+      },
     ],
   });
 
@@ -143,6 +159,9 @@ export async function answerSlackMessage(
   let progressTs: string | undefined;
   let progress: ReturnType<typeof createProgressTracker> | undefined;
   if (addressed) {
+    // Linked from the checklist while it's live, so whoever's watching can
+    // jump to the full transcript without waiting for the run to finish.
+    const transcriptUrl = sessionUrl(sessionId);
     try {
       progressTs = await replyInThread({
         botToken: context.botToken,
@@ -150,6 +169,7 @@ export async function answerSlackMessage(
         ts: event.ts,
         threadTs: event.thread_ts,
         text: renderProgress([]),
+        blocks: buildProgressBlocks([], transcriptUrl),
       });
     } catch (error) {
       log("could not post the progress placeholder, continuing without live updates", {
@@ -159,15 +179,18 @@ export async function answerSlackMessage(
     }
     if (progressTs) {
       const placeholderTs = progressTs;
-      progress = createProgressTracker((text) =>
-        updateReply({
-          botToken: context.botToken,
-          channel: event.channel,
-          ts: placeholderTs,
-          text,
-        }).catch((error) => {
-          log("progress update failed", { agent: agent.handle, error });
-        }),
+      progress = createProgressTracker(
+        ({ text, blocks }) =>
+          updateReply({
+            botToken: context.botToken,
+            channel: event.channel,
+            ts: placeholderTs,
+            text,
+            blocks,
+          }).catch((error) => {
+            log("progress update failed", { agent: agent.handle, error });
+          }),
+        { sessionUrl: transcriptUrl },
       );
     }
   }
@@ -421,7 +444,10 @@ async function finishRun(
       // the tool trail behind it — the trail was for watching the run happen,
       // not a record anyone needs once it's done. The full trail still lives
       // in the session's transcript for whoever wants it.
-      await updateReply({ botToken, channel: reply.channel, ts: reply.progressTs, text: toMrkdwn(text) });
+      // `chat.update` keeps a message's previous blocks when none are given,
+      // so the checklist has to be cleared explicitly or it would sit above
+      // the final answer forever.
+      await updateReply({ botToken, channel: reply.channel, ts: reply.progressTs, text: toMrkdwn(text), blocks: [] });
     } else {
       await replyInThread({
         botToken,

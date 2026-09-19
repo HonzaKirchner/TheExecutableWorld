@@ -216,7 +216,28 @@ function EventRow({ event }: { event: SessionEvent }) {
           </p>
         ) : null}
 
-        {event.data && Object.keys(event.data).length > 0 ? (
+        {isThreadContext(event.data) ? (
+          <details className="group mt-2">
+            <summary className="w-fit cursor-pointer list-none text-xs text-muted-foreground transition-colors hover:text-foreground">
+              <span className="group-open:hidden">Show full context</span>
+              <span className="hidden group-open:inline">Hide full context</span>
+            </summary>
+            <ol className="mt-2 space-y-2 rounded-lg border bg-muted/40 p-3">
+              {event.data.thread.map((turn, index) => (
+                <li key={index} className="text-[13px] leading-5">
+                  <span className="font-medium text-muted-foreground">
+                    {turn.role === "assistant" ? "Agent" : "Message"}:{" "}
+                  </span>
+                  <span className="break-words whitespace-pre-wrap">
+                    {typeof turn.content === "string"
+                      ? turn.content
+                      : JSON.stringify(turn.content)}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </details>
+        ) : event.data && Object.keys(event.data).length > 0 ? (
           <details className="group mt-2">
             <summary className="w-fit cursor-pointer list-none text-xs text-muted-foreground transition-colors hover:text-foreground">
               <span className="group-open:hidden">Show details</span>
@@ -229,6 +250,26 @@ function EventRow({ event }: { event: SessionEvent }) {
         ) : null}
       </div>
     </li>
+  );
+}
+
+type ThreadTurn = { role: string; content: unknown };
+
+/**
+ * The one shape of `data` that gets its own rendering: the full thread a
+ * message event's reply was built from, attached by `buildMessages` in
+ * `src/lib/agent/slack.ts` so a reply that clearly used earlier context
+ * doesn't look like it came out of nowhere.
+ */
+function isThreadContext(
+  data: SessionEvent["data"],
+): data is { thread: ThreadTurn[] } {
+  return (
+    data != null &&
+    Array.isArray((data as { thread?: unknown }).thread) &&
+    (data as { thread: unknown[] }).thread.every(
+      (turn) => typeof turn === "object" && turn != null && "role" in turn,
+    )
   );
 }
 

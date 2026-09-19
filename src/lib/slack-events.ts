@@ -216,6 +216,9 @@ export async function fetchThread(input: {
   }
 }
 
+/** A Slack Block Kit block — passed straight through to the API, untyped. */
+export type SlackBlock = Record<string, unknown>;
+
 /** Returns the posted message's `ts`, so a caller can update it later. */
 export async function replyInThread(input: {
   botToken: string;
@@ -224,6 +227,7 @@ export async function replyInThread(input: {
   ts: string;
   threadTs?: string;
   text: string;
+  blocks?: SlackBlock[];
 }): Promise<string | undefined> {
   log("posting reply", {
     channel: input.channel,
@@ -237,6 +241,7 @@ export async function replyInThread(input: {
       channel: input.channel,
       thread_ts: input.threadTs ?? input.ts,
       text: input.text,
+      blocks: input.blocks,
     },
   });
   log("reply posted", { channel: input.channel, ts: response.ts });
@@ -252,10 +257,11 @@ export async function updateReply(input: {
   channel: string;
   ts: string;
   text: string;
+  blocks?: SlackBlock[];
 }) {
   await slackPost("chat.update", {
     token: input.botToken,
-    json: { channel: input.channel, ts: input.ts, text: input.text },
+    json: { channel: input.channel, ts: input.ts, text: input.text, blocks: input.blocks },
   });
 }
 

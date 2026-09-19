@@ -1,3 +1,4 @@
+import { publicBaseUrl } from "@/lib/base-url";
 import { db, ensureSchema } from "@/lib/db";
 
 /**
@@ -360,6 +361,14 @@ export function agentSessionsPath(agentId: string) {
 /** One session, inside the signed-in app. */
 export function agentSessionPath(agentId: string, sessionId: string) {
   return `${agentSessionsPath(agentId)}/${sessionId}`;
+}
+/**
+ * The transcript's full, public URL — reachable by whoever gets the link,
+ * signed in or not (see the route's own doc comment). This is what actually
+ * gets posted into Slack; `sessionPath` alone is only a same-app `<Link>` href.
+ */
+export function sessionUrl(sessionId: string) {
+  return `${publicBaseUrl()}${sessionPath(sessionId)}`;
 }
 
 const UUID_RE =
