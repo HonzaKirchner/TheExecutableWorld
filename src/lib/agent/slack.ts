@@ -5,6 +5,7 @@ import { createProgressTracker, renderProgress } from "@/lib/agent/progress";
 import { isSilence } from "@/lib/agent/prompt";
 import { describeRunFailure, runAgent } from "@/lib/agent/run";
 import { debugScope, preview } from "@/lib/log";
+import { appendSessionEvent, finishSession, startSession } from "@/lib/sessions";
 import {
   fetchThread,
   mentionsUser,
@@ -35,9 +36,11 @@ const THREAD_LIMIT = 50;
  *
  * Only an addressed run gets a live progress message, updated as tools are
  * called and replaced with the final answer when it's done. A run the agent
- * might stay silent on gets no placeholder — nothing appears until it's known
- * there is something to say, so overhearing a thread never looks like the
- * agent butting in to think out loud.
+ * might stay silent on gets no placeholder — nothing appears in Slack until
+ * it's known there is something to say, so overhearing a thread never looks
+ * like the agent butting in to think out loud. Its session (see below) still
+ * records that it looked and passed — that's a private, linkable audit trail,
+ * not something the channel sees.
  */
 export async function answerSlackMessage(
   context: SlackTriggerContext & { botToken: string },
@@ -76,6 +79,10 @@ export async function answerSlackMessage(
   // to the single delivered message is fine for answering a mention, but it
   // can't show how the thread began, and guessing would have the agent join
   // conversations it was never called into.
+  //
+  // Nothing is recorded for a drop here — see `routeMessage`, which already
+  // filters most channel chatter before this function is even called. A
+  // session is a run; a message the agent never looked twice at isn't one.
   if (!addressed) {
     const root = thread?.[0];
     if (!root || !mentionsUser(root.text, context.botUserId)) {
@@ -89,8 +96,30 @@ export async function answerSlackMessage(
     }
   }
 
+  // One session per run, with a transcript anyone holding the link can read
+  // at /s/<id> — no sign-in, so only what a stranger reading over the
+  // person's shoulder could already see goes in: the message and the reply,
+  // never tokens or ids. `onEvent` below appends to it live, so someone
+  // watching sees tool calls arrive as the run makes them, not just at the end.
+  const sessionId = await startSession({
+    agentId: context.agentId,
+    triggerId: context.triggerId,
+    triggerKind: "slack",
+    title: sessionTitle(event, addressed),
+    events: [
+      {
+        type: "trigger",
+        role: "system",
+        body: `Slack delivered ${event.type}.`,
+        data: { event: event.type, channelType: event.channel_type ?? null, addressed },
+      },
+      { type: "message", role: "user", body: event.text ?? "" },
+    ],
+  });
+
   // Posted before the run starts, so the person sees something is happening
-  // rather than watching a mention sit unanswered while it works.
+  // rather than watching a mention sit unanswered while it works. Only for an
+  // addressed message — see the doc comment above.
   let progressTs: string | undefined;
   let progress: ReturnType<typeof createProgressTracker> | undefined;
   if (addressed) {
@@ -124,6 +153,10 @@ export async function answerSlackMessage(
   }
 
   let text: string;
+  // Whether the run itself came back with an answer — kept separate from
+  // whether Slack accepted the reply, since a session is `failed` if either
+  // step didn't, even though `text` (the apology) still gets a post attempt.
+  let runFailed = false;
   try {
     const run = await runAgent({
       agent,
@@ -137,6 +170,14 @@ export async function answerSlackMessage(
       },
       messages: buildMessages(context, event, thread),
       onProgress: progress?.handle,
+      onEvent: (runEvent) => {
+        appendSessionEvent(sessionId, {
+          type: runEvent.type,
+          role: runEvent.type === "tool_call" ? "agent" : "system",
+          body: runEvent.body,
+          data: runEvent.data,
+        }).catch((error) => log("failed to append a session event", { error }));
+      },
     });
 
     console.log(
@@ -162,6 +203,16 @@ export async function answerSlackMessage(
         channel: event.channel,
         threadTs,
       });
+      await finishSession(sessionId, {
+        status: "done",
+        events: [
+          {
+            type: "note",
+            role: "agent",
+            body: "Looked at the message and stayed out — it wasn't addressed to me.",
+          },
+        ],
+      });
       return;
     }
 
@@ -172,6 +223,9 @@ export async function answerSlackMessage(
     console.error(`Agent ${agent.handle} failed to answer`, error);
     log("run failed", { agent: agent.handle, ms: Date.now() - startedAt, error });
     text = describeRunFailure(error);
+    runFailed = true;
+    // Still worth trying to post `text` below — it's the same apology the
+    // person would otherwise get in silence.
   }
 
   // Every progress update handed to `publish` above is fire-and-forget, so
@@ -183,7 +237,8 @@ export async function answerSlackMessage(
     if (progressTs) {
       // Replaces the progress message with the answer, rather than leaving
       // the tool trail behind it — the trail was for watching the run happen,
-      // not a record anyone needs once it's done.
+      // not a record anyone needs once it's done. The full trail still lives
+      // in the session's transcript for whoever wants it.
       await updateReply({
         botToken: context.botToken,
         channel: event.channel,
@@ -199,12 +254,24 @@ export async function answerSlackMessage(
         text: toMrkdwn(text),
       });
     }
+    await finishSession(sessionId, {
+      status: runFailed ? "failed" : "done",
+      error: runFailed ? "The run failed before it could answer." : null,
+      events: [{ type: "reply", role: "agent", body: text }],
+    });
   } catch (error) {
     // The last place a message can vanish: the run worked, the answer exists,
     // and Slack refused to post it — a missing `chat:write`, or a channel the
     // app was never added to.
     console.error(`Agent ${agent.handle} could not post its reply`, error);
     log("reply failed", { agent: agent.handle, channel: event.channel, error });
+    await finishSession(sessionId, {
+      status: "failed",
+      error: runFailed
+        ? "The run failed, and the reply couldn't be posted to Slack either."
+        : "The reply couldn't be posted to Slack.",
+      events: [{ type: "error", role: "system", body: "The reply couldn't be posted to Slack." }],
+    });
   }
 }
 
@@ -213,6 +280,13 @@ function describeTrigger(event: SlackMessageEvent, addressed: boolean) {
   if (event.channel_type === "im") return "a direct message in Slack";
   if (addressed) return "an @mention in a Slack channel";
   return "a new message in a Slack thread you were called into earlier";
+}
+
+/** One line for the session list, in the same three cases as `describeTrigger`. */
+function sessionTitle(event: SlackMessageEvent, addressed: boolean) {
+  if (event.channel_type === "im") return "Direct message";
+  if (addressed) return "Mentioned in a channel";
+  return "Followed up in a thread";
 }
 
 /**

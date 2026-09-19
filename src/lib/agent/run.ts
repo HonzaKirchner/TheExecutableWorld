@@ -36,6 +36,18 @@ export type RunProgress =
   | { type: "tool-start"; callId: string; label: string }
   | { type: "tool-end"; callId: string; label: string; ok: boolean };
 
+/**
+ * One step of the run, in a shape a caller can hand straight to a session's
+ * transcript without this module knowing that transcripts exist. Kept
+ * separate from `AgentRun` because it's reported as it happens, not once at
+ * the end.
+ */
+export type AgentRunEvent = {
+  type: "tool_call" | "tool_result";
+  body: string;
+  data?: Record<string, unknown>;
+};
+
 /** A human name for a tool call — the server it belongs to, not its arguments. */
 function labelFor(labels: Record<string, ToolLabel>, toolName: string) {
   const label = labels[toolName];
@@ -49,6 +61,14 @@ function labelFor(labels: Record<string, ToolLabel>, toolName: string) {
  * This is the whole harness: every trigger builds `messages`, calls this, and
  * decides what to do with the answer. Nothing in here knows about Slack or
  * Stripe, and nothing here writes anywhere — delivery is the caller's job.
+ *
+ * Two independent, optional callbacks report the same tool calls as they
+ * happen, to two different kinds of caller: `onProgress` is for showing the
+ * run live somewhere transient (a Slack message that updates in place),
+ * `onEvent` is for writing it down somewhere durable (a session's
+ * transcript). Neither knows the other exists. Both are best-effort — a throw
+ * from either must not take the run down, since by then the model has
+ * already made the call.
  */
 export async function runAgent(input: {
   agent: Agent;
@@ -56,6 +76,7 @@ export async function runAgent(input: {
   messages: ModelMessage[];
   /** Called as tools are used, so a caller can show the run happening live. */
   onProgress?: (event: RunProgress) => void;
+  onEvent?: (event: AgentRunEvent) => void;
 }): Promise<AgentRun> {
   const model = resolveModel(input.agent.model);
   const tools = await loadAgentTools(input.agent.id);
@@ -88,27 +109,40 @@ export async function runAgent(input: {
       timeout: TIMEOUT_MS,
       onToolExecutionStart: ({ callId, toolCall }) => {
         log("tool call", { tool: toolCall.toolName, input: preview(JSON.stringify(toolCall.input)) });
-        input.onProgress?.({
+        notify(input.onProgress, {
           type: "tool-start",
           callId,
           label: labelFor(tools.labels, toolCall.toolName),
+        });
+        notify(input.onEvent, {
+          type: "tool_call",
+          body: toolCall.toolName,
+          data: { arguments: safeJson(toolCall.input) },
         });
       },
       onToolExecutionEnd: ({ callId, toolCall, toolOutput, toolExecutionMs }) => {
         // A tool that throws doesn't fail the run — the model sees the error
         // and works around it — so this is the only place it shows up.
-        log(toolOutput.type === "tool-error" ? "tool failed" : "tool returned", {
+        const failed = toolOutput.type === "tool-error";
+        log(failed ? "tool failed" : "tool returned", {
           tool: toolCall.toolName,
           ms: toolExecutionMs,
-          ...(toolOutput.type === "tool-error"
+          ...(failed
             ? { error: preview(String(toolOutput.error)) }
             : { output: preview(JSON.stringify(toolOutput.output)) }),
         });
-        input.onProgress?.({
+        notify(input.onProgress, {
           type: "tool-end",
           callId,
           label: labelFor(tools.labels, toolCall.toolName),
-          ok: toolOutput.type !== "tool-error",
+          ok: !failed,
+        });
+        notify(input.onEvent, {
+          type: "tool_result",
+          body: failed ? `${toolCall.toolName} failed` : `${toolCall.toolName} returned`,
+          data: failed
+            ? { error: preview(String(toolOutput.error), 500) }
+            : { output: safeJson(toolOutput.output) },
         });
       },
       onStepEnd: (step) => {
@@ -154,6 +188,33 @@ export async function runAgent(input: {
     throw error;
   } finally {
     await tools.close();
+  }
+}
+
+/**
+ * Hands one event to a caller's sink, if it gave one. A sink is someone
+ * else's write path (a live progress view, a session's transcript) — a throw
+ * from it is their bug, not a reason to lose the model's tool call.
+ */
+function notify<E>(onEvent: ((event: E) => void) | undefined, event: E) {
+  if (!onEvent) return;
+  try {
+    onEvent(event);
+  } catch (error) {
+    log("a progress callback threw", { error });
+  }
+}
+
+/**
+ * A tool's input or output, kept small and always representable as JSON —
+ * this ends up in a session's transcript, which unlike the debug log has no
+ * length budget of its own to protect it.
+ */
+function safeJson(value: unknown): unknown {
+  try {
+    return JSON.parse(preview(JSON.stringify(value) ?? "null", 500));
+  } catch {
+    return preview(String(value), 500);
   }
 }
 

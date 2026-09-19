@@ -1,5 +1,6 @@
 import { getAgentById } from "@/lib/agents";
 import { runAgent } from "@/lib/agent/run";
+import { appendSessionEvent, finishSession, startSession } from "@/lib/sessions";
 import type { StripeEvent } from "@/lib/stripe";
 import type { Trigger } from "@/lib/triggers";
 
@@ -25,6 +26,25 @@ export async function handleStripeEvent(trigger: Trigger, event: StripeEvent) {
     return;
   }
 
+  // As with Slack, one session per run — but only the event's type and id go
+  // into it. The event object itself (handed to the model below) can carry
+  // customer names, emails and amounts, and this transcript is public at
+  // /s/<id> with no sign-in.
+  const sessionId = await startSession({
+    agentId: trigger.agentId,
+    triggerId: trigger.id,
+    triggerKind: "stripe",
+    title: `Stripe ${event.type}`,
+    events: [
+      {
+        type: "trigger",
+        role: "system",
+        body: `Stripe sent ${event.type}.`,
+        data: { event: event.type, id: event.id, livemode: event.livemode ?? null },
+      },
+    ],
+  });
+
   try {
     const run = await runAgent({
       agent,
@@ -48,6 +68,14 @@ export async function handleStripeEvent(trigger: Trigger, event: StripeEvent) {
           ].join("\n"),
         },
       ],
+      onEvent: (runEvent) => {
+        appendSessionEvent(sessionId, {
+          type: runEvent.type,
+          role: runEvent.type === "tool_call" ? "agent" : "system",
+          body: runEvent.body,
+          data: runEvent.data,
+        }).catch(() => {});
+      },
     });
 
     console.log(
@@ -55,8 +83,23 @@ export async function handleStripeEvent(trigger: Trigger, event: StripeEvent) {
         `${run.steps} step(s), ${run.toolCalls.length} tool call(s)` +
         (run.text ? ` — ${run.text}` : ""),
     );
+    await finishSession(sessionId, {
+      status: "done",
+      events: [
+        {
+          type: "note",
+          role: "agent",
+          body: run.text || "Done — no message, only tool calls.",
+        },
+      ],
+    });
   } catch (error) {
     console.error(`Agent ${agent.handle} failed on Stripe ${event.type} (${event.id})`, error);
+    await finishSession(sessionId, {
+      status: "failed",
+      error: "The run failed.",
+      events: [{ type: "error", role: "system", body: "The run failed." }],
+    });
   }
 }
 
