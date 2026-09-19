@@ -4,9 +4,11 @@ import type { SlackAppCredentials } from "@/lib/slack-apps";
 export type Agent = {
   id: string;
   workspaceId: string;
-  name: string;
   handle: string;
+  /** One line about the coworker — also the Slack app's description. */
   description: string | null;
+  /** What the coworker follows. */
+  instructions: string | null;
   model: string;
   createdAt: string;
   slackAppId: string | null;
@@ -17,9 +19,9 @@ export type Agent = {
 type AgentRow = {
   id: string;
   workspace_id: string;
-  name: string;
   handle: string;
   description: string | null;
+  instructions: string | null;
   model: string;
   created_at: string;
   slack_app_id: string | null;
@@ -33,15 +35,15 @@ type AgentRow = {
  * return value should be able to carry them to the client by accident.
  */
 const AGENT_COLUMNS =
-  "id, workspace_id, name, handle, description, model, created_at, slack_app_id, slack_oauth_authorize_url, slack_installed_at";
+  "id, workspace_id, handle, description, instructions, model, created_at, slack_app_id, slack_oauth_authorize_url, slack_installed_at";
 
 function toAgent(row: AgentRow): Agent {
   return {
     id: row.id,
     workspaceId: row.workspace_id,
-    name: row.name,
     handle: row.handle,
     description: row.description,
+    instructions: row.instructions,
     model: row.model,
     createdAt: row.created_at,
     slackAppId: row.slack_app_id,
@@ -135,9 +137,9 @@ export async function getAgent(
 
 export async function createAgent(input: {
   workspaceId: string;
-  name: string;
   handle: string;
   description?: string | null;
+  instructions?: string | null;
   model: string;
   slackApp?: SlackAppCredentials;
 }): Promise<Agent> {
@@ -146,7 +148,7 @@ export async function createAgent(input: {
 
   const rows = (await sql.query(
     `insert into agents (
-       workspace_id, name, handle, description, model,
+       workspace_id, handle, description, instructions, model,
        slack_app_id, slack_client_id, slack_client_secret,
        slack_signing_secret, slack_oauth_authorize_url
      )
@@ -154,9 +156,9 @@ export async function createAgent(input: {
      returning ${AGENT_COLUMNS}`,
     [
       input.workspaceId,
-      input.name,
       input.handle,
       input.description ?? null,
+      input.instructions ?? null,
       input.model,
       input.slackApp?.appId ?? null,
       input.slackApp?.clientId ?? null,

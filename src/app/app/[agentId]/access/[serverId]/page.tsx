@@ -57,7 +57,7 @@ export default async function ToolAccessPage({
         className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
       >
         <ArrowLeft className="size-4" />
-        {agent.name}
+        @{agent.handle}
       </Link>
 
       <div className="mt-6 flex flex-wrap items-start justify-between gap-4">

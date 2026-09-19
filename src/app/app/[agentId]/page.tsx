@@ -61,16 +61,23 @@ export default async function AgentDetailPage({
         Agents
       </Link>
 
-      <div className="mt-6 flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-semibold tracking-tight">{agent.name}</h1>
-        <Badge variant="secondary" className="font-mono text-xs">
-          @{agent.handle}
-        </Badge>
-        {agent.slackInstalledAt ? (
-          <Badge variant="outline" className="gap-1 text-xs">
-            <CircleCheck className="size-3" />
-            In Slack
-          </Badge>
+      <div className="mt-6">
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-2xl font-semibold tracking-tight">
+            <span className="text-muted-foreground">@</span>
+            {agent.handle}
+          </h1>
+          {agent.slackInstalledAt ? (
+            <Badge variant="outline" className="gap-1 text-xs">
+              <CircleCheck className="size-3" />
+              In Slack
+            </Badge>
+          ) : null}
+        </div>
+        {agent.description ? (
+          <p className="mt-1.5 max-w-2xl text-sm text-muted-foreground">
+            {agent.description}
+          </p>
         ) : null}
       </div>
 
@@ -92,11 +99,11 @@ export default async function AgentDetailPage({
             Instructions
           </h2>
           <p className="mt-3 max-w-3xl text-[15px] leading-7 whitespace-pre-wrap">
-            {agent.description ?? "No instructions yet."}
+            {agent.instructions ?? "No instructions yet."}
           </p>
         </div>
 
-        <dl className="grid gap-px border-t bg-border sm:grid-cols-2">
+        <dl className="grid gap-px border-t bg-border sm:grid-cols-3">
         <Field label="Model" value={agent.model} mono />
         <Field
           label="Created"
@@ -106,7 +113,6 @@ export default async function AgentDetailPage({
             day: "numeric",
           })}
         />
-        <Field label="Handle" value={`@${agent.handle}`} mono />
         <Field
           label="Slack app"
           value={agent.slackAppId ?? "Not created"}

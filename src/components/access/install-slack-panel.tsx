@@ -41,7 +41,7 @@ export function InstallSlackPanel({ agent }: { agent: Agent }) {
           </h2>
           <p className="mt-1 max-w-md text-sm text-muted-foreground">
             Nothing happens until the app is installed. Slack will ask you to approve its
-            permissions; after that, mentions and DMs reach {agent.name}.
+            permissions; after that, mentions and DMs reach them.
           </p>
         </div>
       </div>

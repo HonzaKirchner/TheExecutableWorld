@@ -5,6 +5,11 @@ import { Loader2, Plus } from "lucide-react";
 
 import { createAgentAction, type CreateAgentState } from "@/app/app/actions";
 import { DEFAULT_MODEL, MODELS } from "@/lib/models";
+import {
+  DESCRIPTION_MAX,
+  HANDLE_MAX,
+  INSTRUCTIONS_MAX,
+} from "@/lib/agent-limits";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -73,31 +78,18 @@ function NewAgentForm() {
     INITIAL_STATE,
   );
 
-  const nameId = useId();
   const handleId = useId();
+  const descriptionId = useId();
   const modelId = useId();
   const instructionsId = useId();
 
   return (
     <form action={formAction} className="grid gap-5">
-      <Field id={nameId} label="Name" error={state.errors?.name}>
-        <Input
-          id={nameId}
-          name="name"
-          defaultValue={state.values?.name}
-          placeholder="Ada"
-          maxLength={35}
-          autoFocus
-          required
-          aria-invalid={Boolean(state.errors?.name)}
-        />
-      </Field>
-
       <Field
         id={handleId}
-        label="Slack handle"
+        label="Handle"
         error={state.errors?.handle}
-        hint="How people will @mention them in Slack."
+        hint="Their name in Slack, and how people will @mention them."
       >
         <div className="relative">
           <span className="pointer-events-none absolute inset-y-0 left-2.5 flex items-center font-mono text-sm text-muted-foreground">
@@ -108,7 +100,8 @@ function NewAgentForm() {
             name="handle"
             defaultValue={state.values?.handle}
             placeholder="ada"
-            maxLength={80}
+            maxLength={HANDLE_MAX}
+            autoFocus
             required
             spellCheck={false}
             autoCapitalize="none"
@@ -116,6 +109,22 @@ function NewAgentForm() {
             aria-invalid={Boolean(state.errors?.handle)}
           />
         </div>
+      </Field>
+
+      <Field
+        id={descriptionId}
+        label="Short description"
+        error={state.errors?.description}
+        hint="One line about what they do. Shown in Slack next to the app."
+      >
+        <Input
+          id={descriptionId}
+          name="description"
+          defaultValue={state.values?.description}
+          placeholder="Answers support questions from the docs"
+          maxLength={DESCRIPTION_MAX}
+          aria-invalid={Boolean(state.errors?.description)}
+        />
       </Field>
 
       <Field id={modelId} label="Model" error={state.errors?.model}>
@@ -152,7 +161,7 @@ function NewAgentForm() {
           name="instructions"
           defaultValue={state.values?.instructions}
           placeholder="You are a meticulous support engineer. Answer in plain language, always link the relevant doc, and escalate anything touching billing."
-          maxLength={4000}
+          maxLength={INSTRUCTIONS_MAX}
           required
           className="min-h-32"
           aria-invalid={Boolean(state.errors?.instructions)}

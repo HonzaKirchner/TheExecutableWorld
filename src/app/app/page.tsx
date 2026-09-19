@@ -49,21 +49,17 @@ export default async function AgentsPage() {
                 className="group flex h-full flex-col rounded-xl border bg-card p-5 transition-all hover:-translate-y-0.5 hover:border-border/80 hover:shadow-sm"
               >
                 <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <h2 className="truncate font-medium transition-colors group-hover:text-foreground">
-                      {agent.name}
-                    </h2>
-                    <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-                      @{agent.handle}
-                    </p>
-                  </div>
+                  <h2 className="min-w-0 truncate font-medium transition-colors group-hover:text-foreground">
+                    <span className="text-muted-foreground">@</span>
+                    {agent.handle}
+                  </h2>
                   <Badge variant="secondary" className="shrink-0 font-mono text-[10px]">
                     {agent.model}
                   </Badge>
                 </div>
 
                 {agent.description ? (
-                  <p className="mt-3 line-clamp-2 text-sm text-muted-foreground">
+                  <p className="mt-2 line-clamp-2 text-sm text-muted-foreground">
                     {agent.description}
                   </p>
                 ) : null}

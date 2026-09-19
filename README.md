@@ -132,7 +132,7 @@ Six tables, created by [src/lib/db.ts](src/lib/db.ts):
 | --------------------- | ------------------------- | ------------------------------------------------ |
 | `workspaces`          | Slack team id             | One row per Slack workspace                       |
 | `workspace_users`     | Slack user id             | Cascades on workspace delete                      |
-| `agents`              | `uuid`                    | `workspace_id`, `name`, `handle`, `description`, `model`, plus the Slack app it owns and — once installed — its bot token |
+| `agents`              | `uuid`                    | `workspace_id`, `handle`, `description`, `instructions`, `model`, plus the Slack app it owns and — once installed — its bot token |
 | `mcp_connections`     | `uuid`, unique per (agent, server) | An agent's link to one MCP server: OAuth client, tokens, in-flight `state`/verifier, cached discovery |
 | `mcp_tools`           | (connection, tool name)   | The server's tools as last listed, with `allowed` and `requires_approval` |
 | `triggers`            | `uuid`, unique per (agent, kind) | What makes an agent act; the id is the webhook path        |
@@ -171,14 +171,19 @@ material, which is read only by the OAuth client through `loadCredentials`.
 
 ## Creating an agent
 
-"New agent" on `/app` opens a dialog asking for a name, a Slack handle, a model and
-instructions (stored as `description`, shown first on the agent's page). Submitting it runs `createAgentAction` in
-[src/app/app/actions.ts](src/app/app/actions.ts), which:
+"New agent" on `/app` opens a dialog asking for a handle, an optional one-line
+description, a model and instructions. The handle is the agent's only name: it is the
+Slack app's name and the bot's display name, and it heads the agent's page. The
+description is the Slack app's description (140 characters); the instructions are what
+the agent follows and are shown first on its page. Submitting the dialog runs
+`createAgentAction` in [src/app/app/actions.ts](src/app/app/actions.ts), which:
 
 1. re-checks the session (the action is a POST endpoint of its own, reachable without
    the UI);
-2. validates the fields against Slack's own limits — 35 characters for the app name, and
-   `a-z 0-9 . _ -` for the bot display name;
+2. validates the fields against Slack's own limits — 35 characters and `a-z 0-9 . _ -`
+   for the handle (the app-name limit, the tighter of the two it has to satisfy), 140 for
+   the description; the limits live in [src/lib/agent-limits.ts](src/lib/agent-limits.ts)
+   so the form and the action agree;
 3. rejects a handle already used in the workspace *before* calling Slack, because app
    creation is rate limited and an orphaned app has to be cleaned up by hand;
 4. creates a Slack app from a manifest via `apps.manifest.create` — with event

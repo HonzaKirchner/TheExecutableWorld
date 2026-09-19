@@ -1,3 +1,4 @@
+import { DESCRIPTION_MAX } from "@/lib/agent-limits";
 import { baseUrl } from "@/lib/base-url";
 import { getConfigAccessToken } from "@/lib/slack-config-token";
 import { slackPost } from "@/lib/slack";
@@ -25,9 +26,6 @@ export const BOT_SCOPES = [
   "users:read",
 ];
 
-/** display_information.description is capped at 140 characters. */
-const DESCRIPTION_MAX = 140;
-
 /**
  * Where Slack sends people after they install an agent. Slack only accepts a
  * redirect_uri that is listed in the manifest, so the install flow imports
@@ -42,9 +40,9 @@ export const SLACK_INSTALL_REDIRECT_PATH = "/api/slack/install/callback";
 export const BOT_EVENTS = ["app_mention", "message.im"];
 
 export async function createSlackApp(input: {
-  name: string;
   handle: string;
-  instructions: string;
+  /** One line about the coworker; becomes the app's description. */
+  description: string | null;
   /** Where Slack should deliver events — must be reachable from the internet. */
   eventsUrl: string;
 }): Promise<SlackAppCredentials> {
@@ -81,20 +79,21 @@ export async function deleteSlackApp(appId: string) {
 }
 
 export function buildManifest({
-  name,
   handle,
-  instructions,
+  description,
   eventsUrl,
 }: {
-  name: string;
   handle: string;
-  instructions: string;
+  description: string | null;
   eventsUrl: string;
 }) {
   return {
     display_information: {
-      name,
-      description: truncate(instructions, DESCRIPTION_MAX),
+      // The handle is the agent's one name — in Slack's app list as well.
+      name: handle,
+      ...(description
+        ? { description: truncate(description, DESCRIPTION_MAX) }
+        : {}),
     },
     features: {
       bot_user: {

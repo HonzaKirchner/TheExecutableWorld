@@ -73,9 +73,9 @@ async function createSchema() {
     create table if not exists agents (
       id            uuid primary key default gen_random_uuid(),
       workspace_id  text not null references workspaces (id) on delete cascade,
-      name          text not null,
       handle        text not null,
       description   text,
+      instructions  text,
       model         text not null,
       created_at    timestamptz not null default now(),
       updated_at    timestamptz not null default now()
@@ -115,6 +115,24 @@ async function createSchema() {
       add column if not exists slack_bot_token      text,
       add column if not exists slack_bot_user_id    text,
       add column if not exists slack_install_state  text
+  `;
+
+  // The handle is the agent's one identifier, so the separate display name
+  // went away. `description` used to hold the instructions; now it is the
+  // one-line summary (also the Slack app's description) and the instructions
+  // have a column of their own. Agents from before the split are migrated
+  // once: their old text becomes the instructions and they get no summary.
+  await sql`
+    alter table agents
+      add column if not exists instructions text
+  `;
+  await sql`
+    update agents
+    set instructions = description, description = null
+    where instructions is null and description is not null
+  `;
+  await sql`
+    alter table agents drop column if exists name
   `;
 
   // One row per (agent, MCP server) the agent has been pointed at. Everything
