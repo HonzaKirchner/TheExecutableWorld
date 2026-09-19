@@ -165,6 +165,13 @@ async function createSchema() {
     )
   `;
 
+  // Servers outside the catalog are connected by URL, so their display name
+  // has nowhere else to live. Null for catalog connections.
+  await sql`
+    alter table mcp_connections
+      add column if not exists name text
+  `;
+
   await sql`
     create index if not exists mcp_connections_oauth_state_idx
       on mcp_connections (oauth_state)
@@ -267,19 +274,6 @@ async function createSchema() {
     from agents a
     where not exists (
       select 1 from triggers t where t.agent_id = a.id and t.kind = 'slack'
-    )
-  `;
-
-  // App configuration tokens expire after 12 hours and each rotation
-  // invalidates the previous refresh token, so the current pair has to be
-  // persisted rather than kept in memory or in the environment.
-  await sql`
-    create table if not exists slack_config_tokens (
-      id            text primary key,
-      access_token  text not null,
-      refresh_token text not null,
-      expires_at    timestamptz not null,
-      updated_at    timestamptz not null default now()
     )
   `;
 }

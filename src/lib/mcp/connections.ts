@@ -27,6 +27,8 @@ export type McpConnection = {
   agentId: string;
   serverId: string;
   serverUrl: string;
+  /** Set for custom servers only; catalog servers are named by the catalog. */
+  name: string | null;
   status: McpConnectionStatus;
   toolsSyncedAt: string | null;
   createdAt: string;
@@ -68,6 +70,7 @@ type ConnectionRow = {
   agent_id: string;
   server_id: string;
   server_url: string;
+  name: string | null;
   status: McpConnectionStatus;
   tools_synced_at: string | null;
   created_at: string;
@@ -98,7 +101,7 @@ type CredentialsRow = {
 };
 
 const CONNECTION_COLUMNS =
-  "id, agent_id, server_id, server_url, status, tools_synced_at, created_at";
+  "id, agent_id, server_id, server_url, name, status, tools_synced_at, created_at";
 
 function toConnection(row: ConnectionRow): McpConnection {
   return {
@@ -106,6 +109,7 @@ function toConnection(row: ConnectionRow): McpConnection {
     agentId: row.agent_id,
     serverId: row.server_id,
     serverUrl: row.server_url,
+    name: row.name,
     status: row.status,
     toolsSyncedAt: row.tools_synced_at,
     createdAt: row.created_at,
@@ -130,7 +134,7 @@ export async function listConnections(
   const sql = db();
 
   const rows = (await sql.query(
-    `select c.id, c.agent_id, c.server_id, c.server_url, c.status,
+    `select c.id, c.agent_id, c.server_id, c.server_url, c.name, c.status,
             c.tools_synced_at, c.created_at,
             count(t.name)                                   as tool_count,
             count(t.name) filter (where t.allowed)          as allowed_count,
@@ -183,7 +187,7 @@ export async function getConnectionByState(
   const sql = db();
 
   const rows = (await sql.query(
-    `select c.id, c.agent_id, c.server_id, c.server_url, c.status,
+    `select c.id, c.agent_id, c.server_id, c.server_url, c.name, c.status,
             c.tools_synced_at, c.created_at, a.workspace_id
      from mcp_connections c
      join agents a on a.id = c.agent_id
@@ -205,18 +209,21 @@ export async function upsertConnection(input: {
   agentId: string;
   serverId: string;
   serverUrl: string;
+  /** Custom servers only. Left out, an existing name is kept. */
+  name?: string | null;
 }): Promise<McpConnection> {
   await ensureSchema();
   const sql = db();
 
   const rows = (await sql.query(
-    `insert into mcp_connections (agent_id, server_id, server_url)
-     values ($1, $2, $3)
+    `insert into mcp_connections (agent_id, server_id, server_url, name)
+     values ($1, $2, $3, $4)
      on conflict (agent_id, server_id) do update
        set server_url = excluded.server_url,
+           name       = coalesce(excluded.name, mcp_connections.name),
            updated_at = now()
      returning ${CONNECTION_COLUMNS}`,
-    [input.agentId, input.serverId, input.serverUrl],
+    [input.agentId, input.serverId, input.serverUrl, input.name ?? null],
   )) as ConnectionRow[];
 
   return toConnection(rows[0]);

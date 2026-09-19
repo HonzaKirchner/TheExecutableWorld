@@ -4,7 +4,7 @@ import { ArrowLeft, CircleAlert } from "lucide-react";
 
 import { auth } from "@/auth";
 import { getAgent } from "@/lib/agents";
-import { getMcpServer } from "@/lib/mcp/catalog";
+import { describeConnection, getMcpServer, isCustomServerId } from "@/lib/mcp/catalog";
 import { connectAndListTools, type ConnectResult } from "@/lib/mcp/client";
 import { getConnection, listTools, syncTools } from "@/lib/mcp/connections";
 import { suggestApproval } from "@/lib/mcp/tools";
@@ -20,11 +20,12 @@ export default async function ToolAccessPage({
   const session = await auth();
   const workspaceId = session?.slack?.teamId;
   const agent = workspaceId ? await getAgent(workspaceId, agentId) : null;
-  const server = getMcpServer(serverId);
-  if (!agent || !server) notFound();
+  if (!agent || !(getMcpServer(serverId) || isCustomServerId(serverId))) notFound();
 
-  const connection = await getConnection(agent.id, server.id);
+  const connection = await getConnection(agent.id, serverId);
   if (!connection) redirect(`/app/${agent.id}`);
+  const server = describeConnection(connection);
+  if (!server) notFound();
 
   // Ask the server for its current tools each time the page opens: servers
   // add and rename tools, and a stale list would let people allow things that
@@ -65,6 +66,9 @@ export default async function ToolAccessPage({
           <ServerMark name={server.name} className="size-11 text-base" />
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">{server.name}</h1>
+            {server.custom ? (
+              <p className="mt-1 font-mono text-xs break-all text-muted-foreground">{server.url}</p>
+            ) : null}
             <p className="mt-1 max-w-xl text-sm text-muted-foreground">
               Choose which {server.name} tools @{agent.handle} may call, and which of
               those should wait for someone&apos;s approval.

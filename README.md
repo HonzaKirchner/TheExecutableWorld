@@ -32,7 +32,7 @@ Everything under `/app` is gated by [src/proxy.ts](src/proxy.ts); signed-out vis
    | `SLACK_CLIENT_SECRET`  | Slack app → Basic Information → Client Secret   | yes      |
    | `SLACK_SIGNING_SECRET` | Slack app → Basic Information → Signing Secret  | not yet  |
    | `SLACK_APP_ID`         | Slack app → Basic Information → App ID          | not yet  |
-   | `SLACK_CONFIG_REFRESH_TOKEN` | api.slack.com/apps → Your App Configuration Tokens | to create agents |
+   | `SLACK_CONFIG_ACCESS_TOKEN` / `SLACK_CONFIG_REFRESH_TOKEN` | api.slack.com/apps → Your App Configuration Tokens — the pair as generated; see [App configuration tokens](#app-configuration-tokens) | to create agents |
    | `APP_BASE_URL`         | Origin for OAuth redirect URLs (see below)      | optional |
    | `PUBLIC_BASE_URL`      | Internet-reachable origin for Slack event delivery; defaults to the Vercel production URL | locally, to create agents |
    | `DB_CONNECTION_STRING` | Neon → connection string                        | yes      |
@@ -40,6 +40,11 @@ Everything under `/app` is gated by [src/proxy.ts](src/proxy.ts); signed-out vis
    | `STRIPE_SECRET_KEY`    | The Stripe App developer account's secret key (same mode as the install link) | for Stripe triggers |
    | `STRIPE_INSTALL_LINK`  | An install link copied from the Stripe App's External test tab (test mode), used verbatim | for Stripe triggers |
    | `STRIPE_CLIENT_ID`     | Only as a fallback for a published app without `STRIPE_INSTALL_LINK` | optional |
+   | `GITHUB_MCP_CLIENT_ID` / `GITHUB_MCP_CLIENT_SECRET` | A GitHub App (or OAuth App) with `<base URL>/api/mcp/callback` as its callback URL. GitHub's MCP server doesn't register clients dynamically, so without these the GitHub card can't connect | for GitHub access |
+   | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | A Google Cloud OAuth client (web application) in a project with the Gmail API enabled, with `<base URL>/api/mcp/callback` among its redirect URIs | for Gmail access and triggers |
+   | `GMAIL_PUBSUB_TOPIC` | A Pub/Sub topic, `projects/<project>/topics/<topic>`, that `gmail-api-push@system.gserviceaccount.com` may publish to | for Gmail triggers |
+   | `GMAIL_PUBSUB_TOKEN` | `openssl rand -hex 24` — the topic's push subscription delivers to `<PUBLIC_BASE_URL>/api/gmail/events?token=<this>` | for Gmail triggers |
+   | `CRON_SECRET` | `openssl rand -hex 24` — Vercel sends it with the daily cron that renews Gmail watches | for Gmail triggers |
 
    Auth.js would normally look for `AUTH_SLACK_ID` / `AUTH_SLACK_SECRET`. [src/auth.ts](src/auth.ts)
    passes `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET` to the provider explicitly so the
@@ -133,7 +138,7 @@ Neon Postgres, reached through `@neondatabase/serverless` (HTTP, one round trip 
 query — no pooled connection to keep alive on serverless). Connection string comes from
 `DB_CONNECTION_STRING`.
 
-Six tables, created by [src/lib/db.ts](src/lib/db.ts):
+Seven tables, created by [src/lib/db.ts](src/lib/db.ts):
 
 | Table                 | Key                       | Notes                                            |
 | --------------------- | ------------------------- | ------------------------------------------------ |
@@ -144,13 +149,12 @@ Six tables, created by [src/lib/db.ts](src/lib/db.ts):
 | `mcp_tools`           | (connection, tool name)   | The server's tools as last listed, with `allowed` and `requires_approval` |
 | `triggers`            | `uuid`, unique per (agent, kind) | What makes an agent act: `config.events`, `status`, and for Stripe the connected `account_id` and the last event seen |
 | `stripe_webhook_endpoint` | `'default'`           | The platform's one Connect webhook endpoint at Stripe, with its signing secret |
-| `slack_config_tokens` | `'default'`               | The current app configuration token pair          |
 
 ### Secrets are encrypted
 
 Everything secret that lands in the database — the Slack client and signing secrets of
 generated apps and their bot tokens, the MCP OAuth client/tokens/PKCE verifier, the Stripe
-webhook signing secret, the Slack app configuration token pair — goes through
+webhook signing secret — goes through
 [src/lib/crypto.ts](src/lib/crypto.ts): AES-256-GCM under `ENCRYPTION_KEY`, stored as
 `enc:v1:<iv>.<ciphertext>.<tag>`. Reads refuse values without that prefix, so a plaintext
 column can't be mistaken for an encrypted one. Losing the key means losing every stored
@@ -217,26 +221,33 @@ doesn't collect orphans.
 ### App configuration tokens
 
 `apps.manifest.create` doesn't authenticate with a bot or user token, and you can't get
-its token through OAuth. Generate the first pair by hand under **Your App Configuration
-Tokens** at [api.slack.com/apps](https://api.slack.com/apps) and put the refresh token in
-`SLACK_CONFIG_REFRESH_TOKEN`.
+its token through OAuth. Generate a pair by hand under **Your App Configuration Tokens**
+at [api.slack.com/apps](https://api.slack.com/apps) and put both halves in the
+environment:
 
-From there [src/lib/slack-config-token.ts](src/lib/slack-config-token.ts) keeps it alive:
-the access token lasts 12 hours, and every rotation invalidates the refresh token it came
-from — so the current pair is written back to `slack_config_tokens`. If that row is ever
-lost you have to generate a new pair by hand. When the stored refresh token is rejected
-and `SLACK_CONFIG_REFRESH_TOKEN` holds a different one, the environment value is tried as
-a fallback.
+```ini
+SLACK_CONFIG_ACCESS_TOKEN=xoxe.xoxp-1-...   # good for 12 hours
+SLACK_CONFIG_REFRESH_TOKEN=xoxe-1-...       # swaps for a fresh pair
+```
+
+Nothing is stored in the database. [src/lib/slack-config-token.ts](src/lib/slack-config-token.ts)
+uses the access token from the environment until Slack rejects it, then rotates with the
+refresh token and keeps the new pair in memory for the life of the process. Slack
+invalidates a refresh token the moment it is used, so after the first rotation the
+environment holds a dead one: a new process (a cold start, a redeploy, a restarted
+`next dev`) gets by on the access token while that is still valid, and once it isn't,
+creating or deleting an agent fails with a message saying so. The fix is always the
+same — generate a new pair at api.slack.com/apps and update both variables.
 
 The pair belongs to the workspace it was generated in, which is also the workspace new
-apps are created in — so there's one row, not one per signed-in workspace.
+apps are created in.
 
 ## Triggers
 
 The **Triggers** section lists what makes an agent act: **Slack**, which every agent gets
-automatically, and **Stripe**, which the person connects. Opening a trigger shows its
-webhook, the last event it received, and lets the person choose the events it listens
-for; the choice is stored in `triggers.config.events`.
+automatically, and **Stripe** and **Gmail**, which the person connects. Opening a trigger
+shows its webhook, the last event it received, and lets the person choose the events it
+listens for; the choice is stored in `triggers.config.events`.
 
 ### Slack
 
@@ -346,6 +357,57 @@ As with Slack, the events URL has to be reachable from the internet, so it uses
 shares the database. Test-mode installs send test events only; a sandbox install sends
 events only to an endpoint in that sandbox.
 
+### Gmail
+
+A Gmail trigger wakes the agent when mail lands in a mailbox. Gmail has no webhooks of its
+own: `users.watch` makes it publish to a **Google Cloud Pub/Sub topic**, and a push
+subscription on that topic delivers to this app. The trigger rides on the agent's **Gmail
+MCP connection** (below): the tokens Google issued for the tools are the ones the watch
+uses, so a Google account is granted to an agent once, under Access, and the trigger then
+needs only to be started.
+
+Setting up Google (once):
+
+1. In a Cloud project, enable the **Gmail API** and create an **OAuth client** of type web
+   application with `<APP_BASE_URL>/api/mcp/callback` as a redirect URI (add the production
+   origin too). Put its id and secret in `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
+   Google doesn't register OAuth clients dynamically, which is why the deployment brings
+   its own. While the consent screen is in testing, add the Google accounts that will
+   connect as test users.
+2. Create a **Pub/Sub topic** and grant `gmail-api-push@system.gserviceaccount.com` the
+   Pub/Sub Publisher role on it. Its full name goes into `GMAIL_PUBSUB_TOPIC`.
+3. Give the topic a **push subscription** whose endpoint is
+   `<PUBLIC_BASE_URL>/api/gmail/events?token=<GMAIL_PUBSUB_TOKEN>`. The token is the only
+   thing that tells the subscription's requests from anyone else's, so keep it random.
+4. Set `CRON_SECRET`; Vercel sends it with the daily cron in `vercel.json` that calls
+   `/api/gmail/renew`.
+
+The flow, in [triggers/actions.ts](src/app/app/[agentId]/triggers/actions.ts) and
+[src/lib/gmail/watch.ts](src/lib/gmail/watch.ts):
+
+1. **Start listening** (needs the authorized Gmail connection) calls `users.watch` with the
+   topic and the labels the events map to — `INBOX` for `message.received`, `STARRED` for
+   `message.starred` ([src/lib/gmail-events.ts](src/lib/gmail-events.ts)) — and records
+   the mailbox address, the `historyId` to pick up from and the watch's expiry on the
+   trigger. Saving a different set of events re-issues the watch; the history position
+   carries over so nothing in between is skipped.
+2. `/api/gmail/events` checks the token, decodes the notification (`emailAddress`,
+   `historyId`), finds the active triggers for that address and, for each, lists the
+   mailbox's history since its stored position with `historyTypes=messageAdded,labelAdded`.
+   A message added with `INBOX` (and neither `SENT` nor `DRAFT`) is `message.received`;
+   a `STARRED` label added is `message.starred`. Each occurrence is recorded on the
+   trigger and, for now, only logged — as with the other triggers. The position moves to
+   the furthest id seen, never backwards. If Gmail no longer has history that far back
+   (404), the position resets to the notification's. Pub/Sub is answered 204 in every
+   case it shouldn't retry.
+3. Gmail forgets a watch after seven days. The cron renews every watch within three days
+   of expiry; a notification arriving in that window renews on the side. A renewal that
+   Google refuses (refresh token revoked) marks the trigger `disconnected`.
+4. **Stop listening** deletes the trigger and calls `users.stop` — unless another agent
+   listens to the same mailbox, since the watch is per mailbox, not per agent.
+   Disconnecting the Gmail server under Access stops the trigger first, while the tokens
+   still work.
+
 ## Giving an agent access
 
 The **Access** section on an agent's page lists the MCP servers in
@@ -365,6 +427,26 @@ Streamable HTTP and authorizing with OAuth. Connecting one:
    server declares the tool `readOnlyHint: true`; both are theirs to change). The list is
    refreshed from the server on every visit, keeping the decisions already made.
 4. **Save access** stores the decisions and returns to the agent's page.
+
+Not every server registers clients dynamically. GitHub's and Google's take a client
+registered by hand, named per server in the catalog (`clientEnv`) and read from the
+environment; the provider hands it to the SDK in place of a registered one. Servers
+outside the catalog are added with the **Custom** card, by URL; they get a generated
+`custom-…` id and keep their name on the connection row.
+
+**Gmail** is served by this app itself, at `/api/mcp/gmail`
+([src/lib/gmail/mcp-server.ts](src/lib/gmail/mcp-server.ts)). Google's own Gmail MCP
+server is drafts-only and behind a preview programme, so this one wraps the Gmail API in
+tools that can search and read mail, send and reply, draft, and change labels. It is an
+ordinary OAuth resource server whose authorization server is Google: its 401 names
+`/api/mcp/gmail/oauth-protected-resource`, which points at `accounts.google.com`, and every
+request is checked against Google's `tokeninfo` — the token must have been issued to this
+deployment's client with the `gmail.modify` scope. Connecting it from the Access section
+is therefore the standard flow, with Google's consent screen in the middle
+(`access_type=offline` so a refresh token comes back). Locally, the app connects to itself
+over `https://localhost:3003`, whose certificate Node doesn't trust out of the box: set
+`NODE_EXTRA_CA_CERTS` to the mkcert root (`$(mkcert -CAROOT)/rootCA.pem`) when running
+`npm run dev` to connect Gmail in development.
 
 Everything the OAuth client needs later — registered client, token pair, PKCE verifier,
 discovered endpoints — lives on the connection row, because the next request may run on
@@ -397,8 +479,9 @@ cancellations as a passing toast. Nothing from the URL is rendered as-is.
 
 ## Deploying to Vercel
 
-Set `AUTH_SECRET`, `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `DB_CONNECTION_STRING` and
-`SLACK_CONFIG_REFRESH_TOKEN` as project environment variables. `AUTH_URL` is detected
+Set `AUTH_SECRET`, `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `DB_CONNECTION_STRING`,
+`SLACK_CONFIG_ACCESS_TOKEN` and `SLACK_CONFIG_REFRESH_TOKEN` as project environment
+variables. `AUTH_URL` is detected
 automatically. Add the production callback URL
 (`https://<your-domain>/api/auth/callback/slack`) to the Slack app.
 
@@ -434,7 +517,7 @@ src/
     agents.ts                   Workspace and agent queries
     models.ts                   The models an agent can run on
     slack.ts                    Slack Web API wrapper
-    slack-config-token.ts       App configuration token rotation
+    slack-config-token.ts       App configuration token (env + in-memory rotation)
     slack-apps.ts               App manifest (scopes, events) -> apps.manifest.create
     slack-install.ts            Install URL + oauth.v2.access
     slack-events.ts             Signature check, event shapes, reply

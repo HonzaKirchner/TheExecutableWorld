@@ -129,7 +129,13 @@ export default async function AgentDetailPage({
         </dl>
       </section>
 
-      <TriggersSection agent={agent} triggers={triggers} />
+      <TriggersSection
+        agent={agent}
+        triggers={triggers}
+        gmailConnected={connections.some(
+          (connection) => connection.serverId === "gmail" && connection.status === "authorized",
+        )}
+      />
 
       <AccessSection agent={agent} connections={connections} />
 

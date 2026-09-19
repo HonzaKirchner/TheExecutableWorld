@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { auth, UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
+import { serverOAuthOptions } from "@/lib/mcp/catalog";
 import type { DiscoveredTool, McpConnection } from "@/lib/mcp/connections";
 import { DbOAuthClientProvider } from "@/lib/mcp/oauth-provider";
 
@@ -21,9 +22,9 @@ export type ConnectResult =
  * until the person revokes it on the server's side.
  */
 export async function connectAndListTools(
-  connection: Pick<McpConnection, "id" | "serverUrl">,
+  connection: Pick<McpConnection, "id" | "serverId" | "serverUrl">,
 ): Promise<ConnectResult> {
-  const provider = new DbOAuthClientProvider(connection.id);
+  const provider = new DbOAuthClientProvider(connection.id, serverOAuthOptions(connection.serverId));
   const client = new Client(CLIENT_INFO);
   const transport = new StreamableHTTPClientTransport(new URL(connection.serverUrl), {
     authProvider: provider,
@@ -50,10 +51,10 @@ export async function connectAndListTools(
  * saved by the provider on the way; the next `connectAndListTools` uses them.
  */
 export async function finishAuthorization(
-  connection: Pick<McpConnection, "id" | "serverUrl">,
+  connection: Pick<McpConnection, "id" | "serverId" | "serverUrl">,
   authorizationCode: string,
 ) {
-  const provider = new DbOAuthClientProvider(connection.id);
+  const provider = new DbOAuthClientProvider(connection.id, serverOAuthOptions(connection.serverId));
   const result = await auth(provider, {
     serverUrl: connection.serverUrl,
     authorizationCode,

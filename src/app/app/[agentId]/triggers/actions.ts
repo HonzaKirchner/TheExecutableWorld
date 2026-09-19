@@ -5,6 +5,10 @@ import { redirect } from "next/navigation";
 
 import { requireAgent } from "@/app/app/require-agent";
 import type { Agent } from "@/lib/agents";
+import { GmailApiError } from "@/lib/gmail/api";
+import { GoogleAuthError, isGmailTriggerConfigured } from "@/lib/gmail/google";
+import { GmailWatchError, startGmailWatch, stopGmailWatch } from "@/lib/gmail/watch";
+import { DEFAULT_GMAIL_EVENTS, normalizeGmailEvents } from "@/lib/gmail-events";
 import { SlackApiError } from "@/lib/slack";
 import { updateSlackApp } from "@/lib/slack-apps";
 import { normalizeSlackEvents } from "@/lib/slack-events-catalog";
@@ -156,6 +160,84 @@ async function deauthorizeIfUnused(accountId: string | null, agent: Agent) {
       console.error(`Could not deauthorize Stripe account for agent ${agent.id}`, error);
     }
   }
+}
+
+/**
+ * Starts watching the mailbox of the agent's Gmail connection. Events start
+ * out as the default (mail received); the trigger page is where they change.
+ */
+export async function startGmailWatchAction(
+  _previous: TriggerActionState,
+  formData: FormData,
+): Promise<TriggerActionState> {
+  const agent = await requireAgent(formData);
+  if ("error" in agent) return agent;
+
+  if (!isGmailTriggerConfigured()) {
+    return {
+      error:
+        "Gmail triggers aren't configured: set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GMAIL_PUBSUB_TOPIC and GMAIL_PUBSUB_TOKEN.",
+    };
+  }
+
+  const existing = await getTrigger(agent.id, "gmail");
+  try {
+    await startGmailWatch(agent.id, existing?.events.length ? existing.events : DEFAULT_GMAIL_EVENTS);
+  } catch (error) {
+    return { error: gmailFailure(error) };
+  }
+
+  revalidatePath(`/app/${agent.id}`);
+  redirect(`/app/${agent.id}/triggers/gmail?started=1`);
+}
+
+/**
+ * Changes which inbox events reach the agent. The watch is re-issued with
+ * the labels the new choice needs; the history position carries over.
+ */
+export async function saveGmailEventsAction(
+  _previous: TriggerActionState,
+  formData: FormData,
+): Promise<TriggerActionState> {
+  const agent = await requireAgent(formData);
+  if ("error" in agent) return agent;
+
+  const trigger = await getTrigger(agent.id, "gmail");
+  if (!trigger || trigger.status !== "active") {
+    return { error: "Start listening before choosing events." };
+  }
+
+  const events = normalizeGmailEvents(strings(formData.getAll("events")));
+  try {
+    await startGmailWatch(agent.id, events);
+  } catch (error) {
+    return { error: gmailFailure(error) };
+  }
+
+  revalidatePath(`/app/${agent.id}`);
+  redirect(`/app/${agent.id}`);
+}
+
+/** Removes the trigger; stops the mailbox watch if no other agent shares it. */
+export async function stopGmailWatchAction(
+  _previous: TriggerActionState,
+  formData: FormData,
+): Promise<TriggerActionState> {
+  const agent = await requireAgent(formData);
+  if ("error" in agent) return agent;
+
+  const trigger = await getTrigger(agent.id, "gmail");
+  if (!trigger) return { error: "This agent has no Gmail trigger." };
+
+  await stopGmailWatch(agent.id, trigger);
+  revalidatePath(`/app/${agent.id}`);
+  redirect(`/app/${agent.id}`);
+}
+
+function gmailFailure(error: unknown) {
+  if (error instanceof GmailWatchError || error instanceof GoogleAuthError) return error.message;
+  if (error instanceof GmailApiError) return `Gmail refused: ${error.message}`;
+  return error instanceof Error ? error.message : "Gmail could not be reached.";
 }
 
 function slackFailure(error: unknown) {

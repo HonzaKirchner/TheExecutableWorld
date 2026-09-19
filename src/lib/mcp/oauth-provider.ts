@@ -10,7 +10,10 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 
+import { checkResourceAllowed } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
+
 import { baseUrl } from "@/lib/base-url";
+import type { ServerOAuthOptions } from "@/lib/mcp/catalog";
 import {
   loadCredentials,
   updateCredentials,
@@ -31,9 +34,15 @@ export const MCP_CALLBACK_PATH = "/api/mcp/callback";
  * can't navigate from inside a callback. `redirectToAuthorization` records the
  * URL instead, and the caller performs the redirect once the SDK has thrown
  * its `UnauthorizedError`.
+ *
+ * Servers that don't register clients dynamically get a `preregistered`
+ * client instead (see `ServerOAuthOptions`). Handing it back from
+ * `clientInformation` is what stops the SDK from trying to register one.
  */
 export class DbOAuthClientProvider implements OAuthClientProvider {
   readonly connectionId: string;
+
+  private readonly options: ServerOAuthOptions;
 
   /** Set once the SDK has asked for the person to be sent off to authorize. */
   authorizationUrl: URL | undefined;
@@ -42,8 +51,9 @@ export class DbOAuthClientProvider implements OAuthClientProvider {
   // per connection attempt; one round trip is enough.
   private credentials: Promise<McpCredentials> | undefined;
 
-  constructor(connectionId: string) {
+  constructor(connectionId: string, options: ServerOAuthOptions = {}) {
     this.connectionId = connectionId;
+    this.options = options;
   }
 
   get redirectUrl() {
@@ -71,7 +81,19 @@ export class DbOAuthClientProvider implements OAuthClientProvider {
   }
 
   async clientInformation() {
-    return (await this.load()).clientInformation ?? undefined;
+    return this.options.preregistered ?? (await this.load()).clientInformation ?? undefined;
+  }
+
+  /**
+   * The SDK's default, minus the `resource` parameter for servers that asked
+   * not to get one. Only ever a URL when the server published metadata.
+   */
+  async validateResourceURL(serverUrl: string | URL, resource?: string) {
+    if (this.options.resourceIndicator === false || !resource) return undefined;
+    if (!checkResourceAllowed({ requestedResource: serverUrl, configuredResource: resource })) {
+      throw new Error(`Protected resource ${resource} does not match expected ${String(serverUrl)}`);
+    }
+    return new URL(resource);
   }
 
   async saveClientInformation(clientInformation: OAuthClientInformationMixed) {
@@ -89,6 +111,9 @@ export class DbOAuthClientProvider implements OAuthClientProvider {
   }
 
   async redirectToAuthorization(authorizationUrl: URL) {
+    for (const [key, value] of Object.entries(this.options.authorizationParams ?? {})) {
+      authorizationUrl.searchParams.set(key, value);
+    }
     this.authorizationUrl = authorizationUrl;
   }
 

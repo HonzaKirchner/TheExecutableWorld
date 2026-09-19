@@ -4,6 +4,7 @@ import { useActionState, useId, useMemo, useState } from "react";
 import { Loader2, Lock } from "lucide-react";
 
 import {
+  saveGmailEventsAction,
   saveSlackEventsAction,
   saveStripeEventsAction,
   type TriggerActionState,
@@ -16,6 +17,18 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+
+const SAVE_ACTIONS = {
+  slack: saveSlackEventsAction,
+  stripe: saveStripeEventsAction,
+  gmail: saveGmailEventsAction,
+} satisfies Record<TriggerKind, unknown>;
+
+const FOOTNOTES: Record<TriggerKind, string> = {
+  slack: "Saved to the app's manifest at Slack.",
+  stripe: "Only these events reach the agent; everything else Stripe sends is dropped here.",
+  gmail: "Saving asks Gmail to watch the labels these need.",
+};
 
 export type EventOption = {
   id: string;
@@ -45,7 +58,7 @@ export function TriggerEventsForm({
   granted?: string[] | null;
 }) {
   const [state, formAction, pending] = useActionState<TriggerActionState, FormData>(
-    kind === "slack" ? saveSlackEventsAction : saveStripeEventsAction,
+    SAVE_ACTIONS[kind],
     {},
   );
 
@@ -177,9 +190,7 @@ export function TriggerEventsForm({
 
       <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
         <p className="text-xs text-muted-foreground">
-          {kind === "slack"
-            ? "Saved to the app's manifest at Slack."
-            : "Only these events reach the agent; everything else Stripe sends is dropped here."}
+          {FOOTNOTES[kind]}
         </p>
         <div className="flex items-center gap-3">
           {state.error ? (

@@ -2,8 +2,15 @@ import Link from "next/link";
 import { ChevronRight, Link2, Zap } from "lucide-react";
 
 import type { Agent } from "@/lib/agents";
+import { isGmailTriggerConfigured } from "@/lib/gmail/google";
 import { isStripeConfigured } from "@/lib/stripe";
-import { slackEventsUrl, TRIGGERS, type Trigger, type TriggerKind } from "@/lib/triggers";
+import {
+  gmailWatchLapsed,
+  slackEventsUrl,
+  TRIGGERS,
+  type Trigger,
+  type TriggerKind,
+} from "@/lib/triggers";
 import { Badge } from "@/components/ui/badge";
 import {
   Tooltip,
@@ -17,12 +24,19 @@ type Tone = "emerald" | "amber" | "rose" | "muted";
 export function TriggersSection({
   agent,
   triggers,
+  gmailConnected,
 }: {
   agent: Agent;
   triggers: Trigger[];
+  /** Whether the agent's Gmail MCP connection is authorized — the Gmail trigger listens through it. */
+  gmailConnected: boolean;
 }) {
   const byKind = new Map(triggers.map((trigger) => [trigger.kind, trigger]));
-  const stripeConfigured = isStripeConfigured();
+  const configured: Record<TriggerKind, boolean> = {
+    slack: true,
+    stripe: isStripeConfigured(),
+    gmail: isGmailTriggerConfigured(),
+  };
 
   return (
     <section className="mt-12">
@@ -34,8 +48,8 @@ export function TriggersSection({
       <ul className="mt-6 grid gap-3 sm:grid-cols-2">
         {TRIGGERS.map((definition, i) => {
           const trigger = byKind.get(definition.id) ?? null;
-          const available = definition.id !== "stripe" || stripeConfigured;
-          const { tone, label, hint } = describe(definition.id, trigger, agent, available);
+          const available = configured[definition.id];
+          const { tone, label, hint } = describe(definition.id, trigger, agent, available, gmailConnected);
           const active = tone === "emerald";
 
           const body = (
@@ -114,12 +128,34 @@ function describe(
   trigger: Trigger | null,
   agent: Agent,
   available: boolean,
+  gmailConnected: boolean,
 ): { tone: Tone; label: string; hint?: string } {
   if (kind === "slack") {
     if (!trigger) return { tone: "muted", label: "Not added" };
     return agent.slackInstalledAt
       ? { tone: "emerald", label: "Active" }
       : { tone: "amber", label: "Waiting for install" };
+  }
+
+  if (kind === "gmail") {
+    if (!available) {
+      return {
+        tone: "muted",
+        label: "Not configured",
+        hint: "Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GMAIL_PUBSUB_TOPIC and GMAIL_PUBSUB_TOKEN on the deployment to enable Gmail.",
+      };
+    }
+    if (!trigger || trigger.status === "pending") {
+      return gmailConnected
+        ? { tone: "muted", label: "Not listening", hint: "Gmail is connected. Start listening to wake the agent on new mail." }
+        : { tone: "muted", label: "Not connected", hint: "Connect Gmail under Access, then start listening here." };
+    }
+    if (trigger.status === "disconnected") {
+      return { tone: "rose", label: "Disconnected", hint: "Google stopped honouring the tokens. Connect Gmail again." };
+    }
+    return gmailWatchLapsed(trigger)
+      ? { tone: "amber", label: "Renewal due", hint: "The mailbox watch has lapsed. Save the events to renew it." }
+      : { tone: "emerald", label: "Listening" };
   }
 
   if (!available) {

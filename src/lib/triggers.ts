@@ -5,9 +5,10 @@ import { publicBaseUrl } from "@/lib/base-url";
 /**
  * The kinds of trigger an agent can have. Each one is a webhook that an OAuth
  * app somewhere else calls: Slack's Events API for the agent's own Slack app,
- * Stripe's Connect webhook for a Stripe account the person connects.
+ * Stripe's Connect webhook for a Stripe account the person connects, Gmail's
+ * push notifications (via Pub/Sub) for a mailbox the agent has been given.
  */
-export type TriggerKind = "slack" | "stripe";
+export type TriggerKind = "slack" | "stripe" | "gmail";
 
 export type TriggerDefinition = {
   id: TriggerKind;
@@ -30,6 +31,12 @@ export const TRIGGERS: readonly TriggerDefinition[] = [
     description: "Runs on payment events — a refund, a failed charge, a new subscription.",
     automatic: false,
   },
+  {
+    id: "gmail",
+    name: "Gmail",
+    description: "Runs when an email lands in the inbox of the connected Google account.",
+    automatic: false,
+  },
 ];
 
 export function isTriggerKind(value: string): value is TriggerKind {
@@ -43,7 +50,7 @@ export function getTriggerDefinition(kind: TriggerKind) {
 /**
  * `active`: events flow. `pending`: a Stripe connection is waiting for the
  * person to come back from Stripe. `disconnected`: the account revoked the
- * platform's access (Stripe told us so).
+ * platform's access (Stripe told us so; Google refused to refresh).
  */
 export type TriggerStatus = "active" | "pending" | "disconnected";
 
@@ -54,8 +61,12 @@ export type Trigger = {
   status: TriggerStatus;
   /** Event ids the trigger listens for — Slack event names or Stripe event types. */
   events: string[];
-  /** Stripe: the connected account (`acct_…`). */
+  /** Stripe: the connected account (`acct_…`). Gmail: the mailbox's address. */
   accountId: string | null;
+  /** Gmail: where in the mailbox's history the next notification picks up. */
+  historyId: string | null;
+  /** Gmail: when the watch lapses unless renewed. */
+  watchExpiresAt: string | null;
   lastEventAt: string | null;
   lastEventType: string | null;
   createdAt: string;
@@ -66,7 +77,7 @@ type TriggerRow = {
   agent_id: string;
   kind: TriggerKind;
   status: TriggerStatus;
-  config: { events?: unknown } | null;
+  config: { events?: unknown; historyId?: unknown; expiration?: unknown } | null;
   account_id: string | null;
   last_event_at: string | null;
   last_event_type: string | null;
@@ -85,10 +96,23 @@ function toTrigger(row: TriggerRow): Trigger {
     status: row.status,
     events: Array.isArray(events) ? events.filter((e): e is string => typeof e === "string") : [],
     accountId: row.account_id,
+    historyId: typeof row.config?.historyId === "string" ? row.config.historyId : null,
+    watchExpiresAt: expirationToIso(row.config?.expiration),
     lastEventAt: row.last_event_at,
     lastEventType: row.last_event_type,
     createdAt: row.created_at,
   };
+}
+
+/** Gmail reports the watch expiry as epoch milliseconds in a string. */
+function expirationToIso(value: unknown) {
+  const ms = typeof value === "string" || typeof value === "number" ? Number(value) : NaN;
+  return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null;
+}
+
+/** Gmail: whether the watch has run out, so notifications have stopped until it's renewed. */
+export function gmailWatchLapsed(trigger: Trigger, now = Date.now()) {
+  return Boolean(trigger.watchExpiresAt && Date.parse(trigger.watchExpiresAt) < now);
 }
 
 /** The URL Slack calls for this trigger. Its id is the only thing in the path. */
@@ -231,6 +255,85 @@ export async function findStripeTriggers(accountId: string, eventType: string): 
     [accountId, eventType],
   )) as TriggerRow[];
   return rows.map(toTrigger);
+}
+
+/*
+ * Gmail. One watch per mailbox; the trigger remembers the address it's for,
+ * where in the history it got to, and when the watch has to be renewed.
+ */
+
+export async function markGmailWatching(
+  triggerId: string,
+  input: { email: string; historyId: string; expiration: string },
+) {
+  await ensureSchema();
+  const sql = db();
+  await sql.query(
+    `update triggers
+     set account_id = $2, status = 'active',
+         config = config || jsonb_build_object('historyId', $3::text, 'expiration', $4::text)
+     where id = $1`,
+    [triggerId, input.email, input.historyId, input.expiration],
+  );
+}
+
+/** A renewal moves the expiry only: the history position must not jump. */
+export async function updateGmailWatchExpiration(triggerId: string, expiration: string) {
+  await ensureSchema();
+  const sql = db();
+  await sql.query(
+    `update triggers set config = jsonb_set(config, '{expiration}', to_jsonb($2::text)) where id = $1`,
+    [triggerId, expiration],
+  );
+}
+
+export async function updateGmailHistoryId(triggerId: string, historyId: string) {
+  await ensureSchema();
+  const sql = db();
+  await sql.query(
+    `update triggers set config = jsonb_set(config, '{historyId}', to_jsonb($2::text)) where id = $1`,
+    [triggerId, historyId],
+  );
+}
+
+/** The triggers a Gmail notification is for. Several agents can share a mailbox. */
+export async function findGmailTriggers(email: string): Promise<Trigger[]> {
+  await ensureSchema();
+  const sql = db();
+  const rows = (await sql.query(
+    `select ${TRIGGER_COLUMNS}
+     from triggers
+     where kind = 'gmail' and status = 'active' and lower(account_id) = lower($1)`,
+    [email],
+  )) as TriggerRow[];
+  return rows.map(toTrigger);
+}
+
+export async function listActiveGmailTriggers(): Promise<Trigger[]> {
+  await ensureSchema();
+  const sql = db();
+  const rows = (await sql.query(
+    `select ${TRIGGER_COLUMNS} from triggers where kind = 'gmail' and status = 'active'`,
+  )) as TriggerRow[];
+  return rows.map(toTrigger);
+}
+
+/** Whether any other agent still listens to this mailbox — stopping the watch would silence it too. */
+export async function countOtherGmailTriggers(email: string, agentId: string) {
+  await ensureSchema();
+  const sql = db();
+  const rows = (await sql`
+    select count(*)::int as n from triggers
+    where kind = 'gmail' and lower(account_id) = lower(${email}) and agent_id <> ${agentId}
+  `) as { n: number }[];
+  return rows[0]?.n ?? 0;
+}
+
+/** The service no longer honours our tokens; the person has to connect again. */
+export async function markTriggerDisconnected(triggerId: string) {
+  await ensureSchema();
+  const sql = db();
+  await sql`update triggers set status = 'disconnected' where id = ${triggerId}`;
 }
 
 /** The only evidence, short of logs, that a webhook is being called. */

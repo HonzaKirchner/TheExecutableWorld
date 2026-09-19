@@ -4,6 +4,11 @@ import { ArrowLeft, CircleAlert, CircleCheck, Zap } from "lucide-react";
 
 import { auth } from "@/auth";
 import { getAgent } from "@/lib/agents";
+import { gmailPushUrl, isGmailTriggerConfigured } from "@/lib/gmail/google";
+import { GMAIL_EVENTS } from "@/lib/gmail-events";
+import { getConnection } from "@/lib/mcp/connections";
+import { MCP_CALLBACK_PATH } from "@/lib/mcp/oauth-provider";
+import { baseUrl } from "@/lib/base-url";
 import { missingScopes, SLACK_EVENTS } from "@/lib/slack-events-catalog";
 import { isStripeConfigured, stripeConnectRedirectUri, stripeEventsUrl } from "@/lib/stripe";
 import { STRIPE_EVENTS } from "@/lib/stripe-events";
@@ -11,11 +16,17 @@ import { getStripeEndpoint } from "@/lib/stripe-webhook";
 import {
   getTrigger,
   getTriggerDefinition,
+  gmailWatchLapsed,
   isTriggerKind,
   slackEventsUrl,
   type Trigger,
 } from "@/lib/triggers";
 import { FlashToast } from "@/components/flash-toast";
+import {
+  ConnectGmailButton,
+  StartGmailWatchButton,
+  StopGmailWatchButton,
+} from "@/components/triggers/gmail-buttons";
 import { ConnectStripeButton, DisconnectStripeButton } from "@/components/triggers/stripe-buttons";
 import { TriggerEventsForm } from "@/components/triggers/trigger-events-form";
 import { Badge } from "@/components/ui/badge";
@@ -69,15 +80,21 @@ export default async function TriggerPage({
             <p className="mt-1 max-w-xl text-sm text-muted-foreground">
               {kind === "slack"
                 ? `What in Slack makes @${agent.handle} act. Each event needs the app to hold the matching permission.`
-                : `Which Stripe events reach @${agent.handle}. They come from the Stripe account you connect here.`}
+                : kind === "stripe"
+                  ? `Which Stripe events reach @${agent.handle}. They come from the Stripe account you connect here.`
+                  : `What in Gmail wakes @${agent.handle}. Notifications come from the Google account connected under Access.`}
             </p>
           </div>
         </div>
         {kind === "stripe" && trigger ? <DisconnectStripeButton agentId={agent.id} /> : null}
+        {kind === "gmail" && trigger ? <StopGmailWatchButton agentId={agent.id} /> : null}
       </div>
 
       {query.connected === "1" ? (
         <Notice icon={CircleCheck}>Stripe account connected. Now pick the events to listen for.</Notice>
+      ) : null}
+      {query.started === "1" ? (
+        <Notice icon={CircleCheck}>Listening. New mail in the inbox now reaches @{agent.handle}.</Notice>
       ) : null}
       {error ? (
         <Notice icon={CircleAlert} tone="error">
@@ -88,10 +105,147 @@ export default async function TriggerPage({
 
       {kind === "slack" ? (
         <SlackDetail agent={agent} trigger={trigger} />
-      ) : (
+      ) : kind === "stripe" ? (
         <StripeDetail agent={agent} trigger={trigger} />
+      ) : (
+        <GmailDetail agent={agent} trigger={trigger} />
       )}
     </div>
+  );
+}
+
+async function GmailDetail({
+  agent,
+  trigger,
+}: {
+  agent: Awaited<ReturnType<typeof getAgent>> & object;
+  trigger: Trigger | null;
+}) {
+  if (!isGmailTriggerConfigured()) {
+    return (
+      <section className="mt-8 rounded-xl border border-dashed px-6 py-10 text-sm">
+        <h2 className="font-medium">Gmail isn&apos;t configured on this deployment</h2>
+        <p className="mt-2 max-w-xl text-muted-foreground">
+          Mailboxes are watched through Gmail&apos;s push notifications, which arrive over a
+          Google Cloud Pub/Sub topic. The environment needs:
+        </p>
+        <ul className="mt-3 list-disc space-y-1 pl-5 text-muted-foreground">
+          <li>
+            <code className="font-mono text-xs">GOOGLE_CLIENT_ID</code> /{" "}
+            <code className="font-mono text-xs">GOOGLE_CLIENT_SECRET</code> — an OAuth client in a
+            Cloud project with the Gmail API enabled, allowing the redirect URI{" "}
+            <code className="font-mono text-xs break-all">{`${baseUrl()}${MCP_CALLBACK_PATH}`}</code>.
+          </li>
+          <li>
+            <code className="font-mono text-xs">GMAIL_PUBSUB_TOPIC</code> — a Pub/Sub topic
+            (<code className="font-mono text-xs">projects/…/topics/…</code>) that{" "}
+            <code className="font-mono text-xs">gmail-api-push@system.gserviceaccount.com</code> may
+            publish to.
+          </li>
+          <li>
+            <code className="font-mono text-xs">GMAIL_PUBSUB_TOKEN</code> — a random secret. Give the
+            topic a push subscription to{" "}
+            <code className="font-mono text-xs break-all">{gmailPushUrl()}?token=&lt;that secret&gt;</code>.
+          </li>
+        </ul>
+      </section>
+    );
+  }
+
+  const connection = await getConnection(agent.id, "gmail");
+  if (connection?.status !== "authorized") {
+    return (
+      <section className="mt-8 rounded-2xl border border-rose-200/70 bg-gradient-to-br from-rose-50 via-orange-50/60 to-amber-50/50 px-6 py-8 sm:px-8 dark:border-rose-900/50 dark:from-rose-950/40 dark:via-orange-950/20 dark:to-amber-950/10">
+        <h2 className="text-lg font-semibold tracking-tight">Connect Gmail first</h2>
+        <p className="mt-1 max-w-lg text-sm text-muted-foreground">
+          The trigger listens on the Google account @{agent.handle} has under Access — the same
+          grant that gives it its Gmail tools. Google will ask you to approve; afterwards, come
+          back here to start listening.
+        </p>
+        <div className="mt-5">
+          <ConnectGmailButton agentId={agent.id} />
+        </div>
+      </section>
+    );
+  }
+
+  if (!trigger || trigger.status !== "active") {
+    return (
+      <section className="mt-8 rounded-2xl border border-rose-200/70 bg-gradient-to-br from-rose-50 via-orange-50/60 to-amber-50/50 px-6 py-8 sm:px-8 dark:border-rose-900/50 dark:from-rose-950/40 dark:via-orange-950/20 dark:to-amber-950/10">
+        <h2 className="text-lg font-semibold tracking-tight">Start listening to the inbox</h2>
+        <p className="mt-1 max-w-lg text-sm text-muted-foreground">
+          Gmail will notify this deployment whenever mail arrives, and @{agent.handle} hears
+          about it. You can add starred mail as a second event afterwards.
+          {trigger?.status === "disconnected"
+            ? " The previous watch stopped because Google no longer honoured the tokens; the connection has since been renewed."
+            : null}
+        </p>
+        <div className="mt-5">
+          <StartGmailWatchButton agentId={agent.id} />
+        </div>
+      </section>
+    );
+  }
+
+  const lapsed = gmailWatchLapsed(trigger);
+
+  return (
+    <>
+      <dl className="mt-8 grid gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-[1fr_2fr]">
+        <Field label="Status">
+          {lapsed ? <Dot tone="amber">Renewal due</Dot> : <Dot tone="emerald">Listening</Dot>}
+        </Field>
+        <Field label="Mailbox">
+          <span className="font-mono text-xs">{trigger.accountId}</span>
+        </Field>
+        <Field label="Last event">
+          {trigger.lastEventAt ? (
+            <>
+              <code className="font-mono text-xs">{trigger.lastEventType}</code>{" "}
+              <span className="text-muted-foreground">· {formatTime(trigger.lastEventAt)}</span>
+            </>
+          ) : (
+            <span className="text-muted-foreground">None yet</span>
+          )}
+        </Field>
+        <Field label="Watch">
+          {trigger.watchExpiresAt ? (
+            <>
+              {lapsed ? "Lapsed" : "Renews before"} {formatTime(trigger.watchExpiresAt)}
+              <span className="mt-1 block text-xs text-muted-foreground">
+                Gmail forgets a watch after seven days; it&apos;s renewed daily and whenever a
+                notification arrives.
+              </span>
+            </>
+          ) : (
+            <span className="text-muted-foreground">Unknown</span>
+          )}
+        </Field>
+        <Field label="Push endpoint" className="sm:col-span-2">
+          <span className="font-mono text-xs break-all">{gmailPushUrl()}</span>
+          <span className="mt-1 block text-xs text-muted-foreground">
+            The Pub/Sub subscription pushes here, with the deployment&apos;s token in the query.
+          </span>
+        </Field>
+      </dl>
+
+      <h2 className="mt-10 text-lg font-semibold tracking-tight">Events</h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        What in the mailbox @{agent.handle} hears about. Saving re-issues the watch with the
+        labels these need{lapsed ? ", which also renews it" : ""}.
+      </p>
+      <TriggerEventsForm
+        agentId={agent.id}
+        kind="gmail"
+        options={GMAIL_EVENTS.map(({ id, name, description, required }) => ({
+          id,
+          name,
+          description,
+          required,
+        }))}
+        selected={trigger.events}
+      />
+    </>
   );
 }
 
@@ -303,9 +457,17 @@ async function StripeDetail({
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  children,
+  className = "",
+}: {
+  label: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
   return (
-    <div className="bg-card px-5 py-4">
+    <div className={`bg-card px-5 py-4 ${className}`}>
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className="mt-1 text-sm">{children}</dd>
     </div>

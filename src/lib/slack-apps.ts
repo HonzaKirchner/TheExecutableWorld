@@ -1,6 +1,6 @@
 import { DESCRIPTION_MAX } from "@/lib/agent-limits";
 import { baseUrl } from "@/lib/base-url";
-import { getConfigAccessToken } from "@/lib/slack-config-token";
+import { withConfigToken } from "@/lib/slack-config-token";
 import { botScopesFor, normalizeSlackEvents } from "@/lib/slack-events-catalog";
 import { slackPost } from "@/lib/slack";
 
@@ -30,23 +30,23 @@ export type ManifestInput = {
 };
 
 export async function createSlackApp(input: ManifestInput): Promise<SlackAppCredentials> {
-  const token = await getConfigAccessToken();
-
-  const response = await slackPost<{
-    ok: true;
-    app_id: string;
-    credentials: {
-      client_id: string;
-      client_secret: string;
-      signing_secret: string;
-      verification_token: string;
-    };
-    oauth_authorize_url: string;
-  }>("apps.manifest.create", {
-    token,
-    // The manifest goes over as a JSON *string*, not as a nested object.
-    form: { manifest: JSON.stringify(buildManifest(input)) },
-  });
+  const response = await withConfigToken((token) =>
+    slackPost<{
+      ok: true;
+      app_id: string;
+      credentials: {
+        client_id: string;
+        client_secret: string;
+        signing_secret: string;
+        verification_token: string;
+      };
+      oauth_authorize_url: string;
+    }>("apps.manifest.create", {
+      token,
+      // The manifest goes over as a JSON *string*, not as a nested object.
+      form: { manifest: JSON.stringify(buildManifest(input)) },
+    }),
+  );
 
   return {
     appId: response.app_id,
@@ -58,8 +58,9 @@ export async function createSlackApp(input: ManifestInput): Promise<SlackAppCred
 }
 
 export async function deleteSlackApp(appId: string) {
-  const token = await getConfigAccessToken();
-  await slackPost("apps.manifest.delete", { token, form: { app_id: appId } });
+  await withConfigToken((token) =>
+    slackPost("apps.manifest.delete", { token, form: { app_id: appId } }),
+  );
 }
 
 /**
@@ -68,11 +69,12 @@ export async function deleteSlackApp(appId: string) {
  * when it is installed again.
  */
 export async function updateSlackApp(appId: string, input: ManifestInput) {
-  const token = await getConfigAccessToken();
-  await slackPost("apps.manifest.update", {
-    token,
-    form: { app_id: appId, manifest: JSON.stringify(buildManifest(input)) },
-  });
+  await withConfigToken((token) =>
+    slackPost("apps.manifest.update", {
+      token,
+      form: { app_id: appId, manifest: JSON.stringify(buildManifest(input)) },
+    }),
+  );
 }
 
 export function buildManifest({ handle, description, eventsUrl, events }: ManifestInput) {
