@@ -306,6 +306,38 @@ export async function recordTriggerEvent(triggerId: string, eventType: string) {
 }
 
 /**
+ * Claims a Gmail message for a trigger's event: true the first time, false
+ * for every notification after that carrying the same message. Atomic in the
+ * database, so two notifications unpacked at the same moment can't both win.
+ */
+export async function claimGmailMessage(triggerId: string, eventId: string, messageId: string) {
+  await ensureSchema();
+  const sql = db();
+  const rows = (await sql`
+    insert into gmail_handled_messages (trigger_id, event_id, message_id)
+    values (${triggerId}, ${eventId}, ${messageId})
+    on conflict do nothing
+    returning message_id
+  `) as { message_id: string }[];
+  return rows.length > 0;
+}
+
+/**
+ * Forgets claims older than `maxAgeMs`. Gmail's history doesn't reach back
+ * further than a few weeks, so a message that old can't be listed again.
+ */
+export async function pruneGmailClaims(maxAgeMs: number) {
+  await ensureSchema();
+  const sql = db();
+  const rows = (await sql`
+    delete from gmail_handled_messages
+    where handled_at < now() - make_interval(secs => ${Math.floor(maxAgeMs / 1000)})
+    returning message_id
+  `) as { message_id: string }[];
+  return rows.length;
+}
+
+/**
  * Everything the Slack events endpoint needs to check a request and answer
  * it. Server-only: carries the signing secret and bot token, decrypted.
  * Looked up by the trigger id in the URL, which is why that id is a uuid and

@@ -278,6 +278,26 @@ async function createSchema() {
       add column if not exists last_event_at    timestamptz,
       add column if not exists last_event_type  text
   `;
+
+  // Gmail sends several Pub/Sub notifications for one incoming message and
+  // Pub/Sub may redeliver each, and every one of them lists history from
+  // the trigger's last position — so, until that position moves on, the same
+  // message shows up in every notification, often in parallel invocations.
+  // A row here is the claim that a (trigger, event, message) has been acted
+  // on; the primary key is what makes the first claim the only one.
+  await sql`
+    create table if not exists gmail_handled_messages (
+      trigger_id  uuid not null references triggers (id) on delete cascade,
+      event_id    text not null,
+      message_id  text not null,
+      handled_at  timestamptz not null default now(),
+      primary key (trigger_id, event_id, message_id)
+    )
+  `;
+  await sql`
+    create index if not exists gmail_handled_messages_handled_at_idx
+      on gmail_handled_messages (handled_at)
+  `;
   await sql`
     create index if not exists triggers_account_idx
       on triggers (kind, account_id)

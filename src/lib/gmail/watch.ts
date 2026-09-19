@@ -14,6 +14,7 @@ import { ensureGmailConnection } from "@/lib/gmail/connection";
 import { handleGmailEvent } from "@/lib/agent/gmail";
 import { getConnection } from "@/lib/mcp/connections";
 import {
+  claimGmailMessage,
   countOtherGmailTriggers,
   createTrigger,
   deleteTrigger,
@@ -22,6 +23,7 @@ import {
   listActiveGmailTriggers,
   markGmailWatching,
   markTriggerDisconnected,
+  pruneGmailClaims,
   recordTriggerEvent,
   updateGmailHistoryId,
   updateGmailWatchExpiration,
@@ -40,6 +42,12 @@ import {
  *    which mailbox and how far its history now reaches; what actually
  *    happened comes from `history.list` since the position the trigger last
  *    saw, which is what `processNotification` does.
+ * 3. One incoming message produces several notifications (Gmail sends one
+ *    per label change, Pub/Sub retries on its own), and they arrive in
+ *    parallel, each listing history from the same position. Before an agent
+ *    is run for a message, the (trigger, event, message) is claimed in
+ *    `gmail_handled_messages`; only the notification that wins the claim
+ *    acts, the rest skip it.
  *
  * The Google tokens are the agent's Gmail MCP connection's: the trigger and
  * the tools are one grant. Without that connection there is no trigger.
@@ -50,6 +58,12 @@ const RENEW_AHEAD_MS = 3 * 24 * 60 * 60 * 1000;
 
 /** How many messages one notification is unpacked into, at most. */
 const MESSAGES_PER_NOTIFICATION = 25;
+
+/**
+ * How long a claim on a message is kept. Gmail's history holds about a week;
+ * doubling that leaves no window for a listed message to be unclaimed.
+ */
+const CLAIM_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 
 export class GmailWatchError extends Error {
   constructor(message: string) {
@@ -130,6 +144,10 @@ export async function renewDueWatches(now = Date.now()) {
   for (const trigger of due) {
     results.push({ triggerId: trigger.id, outcome: await renewWatch(trigger) });
   }
+  // The daily cron is also when old claims are let go of.
+  await pruneGmailClaims(CLAIM_RETENTION_MS).catch((error) =>
+    console.error("Pruning old Gmail message claims failed", error),
+  );
   return results;
 }
 
@@ -195,6 +213,10 @@ async function processForTrigger(trigger: Trigger, notification: GmailNotificati
 
   const occurrences = eventsIn(records, trigger.events);
   for (const { eventId, messageId } of occurrences.slice(0, MESSAGES_PER_NOTIFICATION)) {
+    // Another notification for this mailbox — earlier, or running right
+    // now — may already have acted on this message. The claim stays even if
+    // the run below fails: a second run is exactly the duplicate this avoids.
+    if (!(await claimGmailMessage(trigger.id, eventId, messageId))) continue;
     await recordTriggerEvent(trigger.id, eventId).catch(() => {});
     const message = await getMessage(bearer, messageId, "metadata").catch(() => null);
     const summary = message ? summarizeMessage(message, false) : null;

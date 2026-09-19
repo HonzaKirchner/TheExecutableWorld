@@ -482,9 +482,13 @@ The flow, in [triggers/actions.ts](src/app/app/[agentId]/triggers/actions.ts) an
    `historyId`), finds the active triggers for that address and, for each, lists the
    mailbox's history since its stored position with `historyTypes=messageAdded,labelAdded`.
    A message added with `INBOX` (and neither `SENT` nor `DRAFT`) is `message.received`;
-   a `STARRED` label added is `message.starred`. Each occurrence is recorded on the
-   trigger and, for now, only logged — as with the other triggers. The position moves to
-   the furthest id seen, never backwards. If Gmail no longer has history that far back
+   a `STARRED` label added is `message.starred`. Gmail sends several notifications for
+   one message and Pub/Sub retries on its own, all listing history from the same stored
+   position and often in parallel — so each (trigger, event, message) is first claimed in
+   `gmail_handled_messages`, and only the notification that wins the claim acts on it; the
+   claim is kept even if the run fails, and the daily cron drops claims older than two
+   weeks. Each occurrence is recorded on the trigger. The position moves to the furthest
+   id seen, never backwards. If Gmail no longer has history that far back
    (404), the position resets to the notification's. Pub/Sub is answered 204 in every
    case it shouldn't retry.
 3. Gmail forgets a watch after seven days. The cron renews every watch within three days
