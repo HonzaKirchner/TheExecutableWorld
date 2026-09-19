@@ -35,10 +35,13 @@ Everything under `/app` is gated by [src/proxy.ts](src/proxy.ts); signed-out vis
 
 2. In your [Slack app](https://api.slack.com/apps), under **OAuth & Permissions**:
    - add the **User Token Scopes** `openid`, `email`, `profile`
-   - add the redirect URL `https://<your-domain>/api/auth/callback/slack`
+   - add these **Redirect URLs**:
+     - `https://<your-domain>/api/auth/callback/slack`
+     - `https://localhost:3003/api/auth/callback/slack`
 
-   Slack requires **https** for redirect URLs, including in development — use a tunnel
-   (ngrok, Cloudflare Tunnel) and set `AUTH_URL` to the tunnel's https origin.
+   **Both must be `https`.** Slack's settings form will happily save an
+   `http://localhost:...` URL, but the authorize endpoint rejects it at request time with
+   `invalid redirect_uri`. This is why `npm run dev` serves https (below).
 
 3. Run it:
 
@@ -46,9 +49,21 @@ Everything under `/app` is gated by [src/proxy.ts](src/proxy.ts); signed-out vis
    npm run dev
    ```
 
-### Pulling env vars from Vercel
+   The dev server runs on **https://localhost:3003** — `next dev --experimental-https`,
+   which generates a self-signed certificate via `mkcert` into `certificates/`
+   (gitignored).
 
-Instead of writing `.env.local` by hand:
+   The **first run prompts for your macOS password** so mkcert can add its local CA to
+   the system trust store. If that prompt is dismissed or fails, Next prints
+   `Failed to generate self-signed certificate. Falling back to http.` and starts on
+   **http** — at which point Slack sign-in fails again with `invalid redirect_uri`. If
+   you see that, check the startup banner says `https://localhost:3003`, not `http://`.
+
+   `AUTH_URL=https://localhost:3003` lives in `.env.development.local`, which Next loads
+   at higher precedence than `.env.local` — so it survives `npm run env:pull` and applies
+   only in development.
+
+### Pulling env vars from Vercel
 
 ```bash
 npm run env:pull
@@ -58,18 +73,44 @@ This pulls the **Production** environment variables into `.env.local`, because t
 the only environment this project defines — the same values back local development.
 The first run prompts you to log in and link the project.
 
-Two things to know:
+#### Sensitive variables do not come down
 
-- It **overwrites** `.env.local`. Anything you keep there that isn't also set in Vercel
-  Production is lost on every pull — so keep Vercel Production as the source of truth,
-  including `AUTH_SECRET`.
-- Don't set `AUTH_URL` in Vercel. It's only needed to point local dev at an https
-  tunnel, and pulling a production value into `.env.local` would send local sign-in
-  redirects to the production domain. Vercel infers the right URL from the request host
-  on its own.
+Vercel marks Production variables as **Sensitive** by default. Sensitive values can't be
+read back out — not in the dashboard, not via the CLI — so `vercel env pull` writes the
+literal string `[sensitive]` in their place. Auth.js then sends `[sensitive]` to Slack as
+the client secret and Slack replies:
 
-The script goes through `npx`, so the Vercel CLI is not a project dependency — it would
-otherwise be installed on every production build for no reason.
+```json
+{ "ok": false, "error": "bad_client_secret" }
+```
+
+This does **not** affect production: sensitive values are still available to the Vercel
+build container and at runtime. It only breaks local development.
+
+The fix is to keep the real secret in `.env.development.local`, which Next loads at higher
+precedence than `.env.local` and which `env:pull` never touches:
+
+```ini
+# .env.development.local
+AUTH_URL=https://localhost:3003
+SLACK_CLIENT_SECRET=<real value from Slack -> Basic Information>
+```
+
+To check whether a pull gave you placeholders:
+
+```bash
+grep -c '\[sensitive\]' .env.local
+```
+
+#### Other notes
+
+- `env:pull` **overwrites** `.env.local`. Keep anything local-only in
+  `.env.development.local` instead.
+- Don't set `AUTH_URL` in Vercel. It's only needed to point local dev at https, and
+  pulling a production value would send local sign-in redirects to the production domain.
+  Vercel infers the right URL from the request host on its own.
+- The script goes through `npx`, so the Vercel CLI is not a project dependency — it would
+  otherwise be installed on every production build for no reason.
 
 ## Deploying to Vercel
 
