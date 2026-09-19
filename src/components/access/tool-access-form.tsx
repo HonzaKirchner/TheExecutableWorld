@@ -23,7 +23,6 @@ type Choice = {
   requiresApproval: boolean;
   classifierEnabled: boolean;
   classifierSystemPrompt: string;
-  classifierContext: string;
   classifierAutoApprove: string;
   classifierEscalate: string;
 };
@@ -55,7 +54,6 @@ export function ToolAccessForm({
           requiresApproval: tool.requiresApproval,
           classifierEnabled: tool.classifierEnabled,
           classifierSystemPrompt: tool.classifierSystemPrompt ?? "",
-          classifierContext: tool.classifierContext ?? "",
           classifierAutoApprove: tool.classifierAutoApprove ?? "",
           classifierEscalate: tool.classifierEscalate ?? "",
         },
@@ -114,11 +112,6 @@ export function ToolAccessForm({
                   type="hidden"
                   name={`classifierPrompt:${tool.name}`}
                   value={choice.classifierSystemPrompt}
-                />
-                <input
-                  type="hidden"
-                  name={`classifierContext:${tool.name}`}
-                  value={choice.classifierContext}
                 />
                 <input
                   type="hidden"
@@ -301,7 +294,6 @@ function ClassifierPanel({
 }) {
   const toggleId = useId();
   const promptId = useId();
-  const contextId = useId();
   const autoApproveId = useId();
   const escalateId = useId();
 
@@ -326,14 +318,8 @@ function ClassifierPanel({
             label="System prompt"
             value={choice.classifierSystemPrompt}
             onChange={(value) => onChange({ classifierSystemPrompt: value })}
-            placeholder="How Jev should think about this tool."
-          />
-          <Field
-            id={contextId}
-            label="About this tool"
-            value={choice.classifierContext}
-            onChange={(value) => onChange({ classifierContext: value })}
-            placeholder="What it does, and why it usually needs a person."
+            placeholder="What the tool does, and how Jev should think about it."
+            className="sm:col-span-2"
           />
           <Field
             id={autoApproveId}
@@ -361,15 +347,17 @@ function Field({
   value,
   onChange,
   placeholder,
+  className,
 }: {
   id: string;
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder: string;
+  className?: string;
 }) {
   return (
-    <div className="space-y-1">
+    <div className={`space-y-1${className ? ` ${className}` : ""}`}>
       <Label htmlFor={id} className="text-xs text-muted-foreground">
         {label}
       </Label>

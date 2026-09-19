@@ -116,7 +116,6 @@ export async function loadAgentTools(agentId: string): Promise<AgentTools> {
               classifierEnabled: decision.classifierEnabled,
               classifier: {
                 systemPrompt: decision.classifierSystemPrompt,
-                context: decision.classifierContext,
                 autoApproveWhen: decision.classifierAutoApprove,
                 escalateWhen: decision.classifierEscalate,
               },

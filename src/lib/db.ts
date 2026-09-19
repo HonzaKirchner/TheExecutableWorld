@@ -235,6 +235,23 @@ async function createSchema() {
       add column if not exists classifier_escalate       text
   `;
 
+  // "System prompt" and "About this tool" were two free-text fields doing
+  // the same job (both just framing text for the classifier) — folded into
+  // one. Existing values from both survive, concatenated, on the surviving
+  // column.
+  await sql`
+    update mcp_tools
+    set classifier_system_prompt = case
+      when classifier_system_prompt is null or classifier_system_prompt = '' then classifier_context
+      when classifier_context is null or classifier_context = '' then classifier_system_prompt
+      else classifier_system_prompt || E'\n\n' || classifier_context
+    end
+    where classifier_context is not null and classifier_context <> ''
+  `;
+  await sql`
+    alter table mcp_tools drop column if exists classifier_context
+  `;
+
   // What makes an agent act. One row per (agent, kind); the row's id is the
   // path segment of the webhook the outside service calls.
   await sql`

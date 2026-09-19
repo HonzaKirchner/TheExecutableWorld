@@ -90,12 +90,19 @@ export const DEFAULT_SLACK_EVENTS: readonly string[] = ["app_mention", "message.
  * which meant an agent that just listened for mentions could never read the
  * thread it was mentioned in. Slack has no narrower scope for "this one
  * thread": reading a thread means being allowed to read the conversation.
+ *
+ * `channels:read`/`groups:read` are here too, even though `member_joined_channel`
+ * also asks for them (see below): the audit-settings channel picker
+ * (`loadSlackDirectory` in slack-directory.ts) lists channels for every agent,
+ * not just ones with that event or the `list_channels` tool enabled.
  */
 export const BASE_BOT_SCOPES: readonly string[] = [
   "chat:write",
   "im:write",
   "im:read",
   "users:read",
+  "channels:read",
+  "groups:read",
   "channels:history",
   "groups:history",
   "im:history",

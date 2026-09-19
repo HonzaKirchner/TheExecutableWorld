@@ -4,7 +4,12 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import { SlackApiError, slackPost } from "@/lib/slack";
+import {
+  SlackApiError,
+  slackPost,
+  listSlackChannels as listConversations,
+  listSlackUsers as listMembers,
+} from "@/lib/slack";
 import { getSlackTool } from "@/lib/slack-tools-catalog";
 
 /**
@@ -303,27 +308,6 @@ async function channelFor(token: string, channelOrUser: string) {
   return opened.channel.id;
 }
 
-type RawChannel = {
-  id: string;
-  name?: string;
-  is_private?: boolean;
-  is_member?: boolean;
-  is_archived?: boolean;
-  num_members?: number;
-  topic?: { value?: string };
-  purpose?: { value?: string };
-};
-
-type RawMember = {
-  id: string;
-  name?: string;
-  real_name?: string;
-  deleted?: boolean;
-  is_bot?: boolean;
-  tz?: string;
-  profile?: { display_name?: string; real_name?: string; title?: string };
-};
-
 type RawMessage = {
   ts?: string;
   user?: string;
@@ -333,42 +317,6 @@ type RawMessage = {
   reply_count?: number;
   subtype?: string;
 };
-
-/** Slack pages at most this far through a list. Workspaces bigger than this get the first pages. */
-const MAX_PAGES = 5;
-
-async function listConversations(token: string) {
-  return paginate<RawChannel>(token, "conversations.list", "channels", {
-    types: "public_channel,private_channel",
-    exclude_archived: "true",
-  });
-}
-
-async function listMembers(token: string) {
-  return paginate<RawMember>(token, "users.list", "members", {});
-}
-
-async function paginate<T>(
-  token: string,
-  method: string,
-  key: string,
-  form: Record<string, string>,
-): Promise<T[]> {
-  const items: T[] = [];
-  let cursor: string | undefined;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const response = await slackPost<{
-      ok: true;
-      response_metadata?: { next_cursor?: string };
-      [key: string]: unknown;
-    }>(method, { token, form: { ...form, limit: "200", ...(cursor ? { cursor } : {}) } });
-    const batch = response[key];
-    if (Array.isArray(batch)) items.push(...(batch as T[]));
-    cursor = response.response_metadata?.next_cursor || undefined;
-    if (!cursor) break;
-  }
-  return items;
-}
 
 function summarizeMessage(message: RawMessage) {
   return {

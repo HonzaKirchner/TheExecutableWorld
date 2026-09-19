@@ -180,6 +180,9 @@ export function buildManifest({
             },
           }
         : {}),
+      ...(interactivityUrl
+        ? { interactivity: { is_enabled: true, request_url: interactivityUrl } }
+        : {}),
     },
   };
 }

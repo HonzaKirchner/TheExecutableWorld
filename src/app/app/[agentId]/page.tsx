@@ -154,7 +154,8 @@ export default async function AgentDetailPage({
 
       <AccessSection agent={agent} connections={connections} />
 
-      <AuditSettingsForm agent={agent} directory={directory} />
+      <AuditSettingsForm
+        agent={agent} directory={directory} />
 
       <InstallSlackPanel agent={agent} missingScopes={missing} listening={Boolean(slackTrigger)} />
     </div>

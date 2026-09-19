@@ -50,7 +50,6 @@ export type McpTool = {
   requiresApproval: boolean;
   classifierEnabled: boolean;
   classifierSystemPrompt: string | null;
-  classifierContext: string | null;
   classifierAutoApprove: string | null;
   classifierEscalate: string | null;
 };
@@ -59,7 +58,6 @@ export type McpTool = {
 export type ClassifierSettings = {
   enabled: boolean;
   systemPrompt: string | null;
-  context: string | null;
   autoApproveWhen: string | null;
   escalateWhen: string | null;
 };
@@ -112,7 +110,6 @@ type ToolRow = {
   requires_approval: boolean;
   classifier_enabled: boolean;
   classifier_system_prompt: string | null;
-  classifier_context: string | null;
   classifier_auto_approve: string | null;
   classifier_escalate: string | null;
 };
@@ -152,7 +149,6 @@ function toTool(row: ToolRow): McpTool {
     requiresApproval: row.requires_approval,
     classifierEnabled: row.classifier_enabled,
     classifierSystemPrompt: row.classifier_system_prompt,
-    classifierContext: row.classifier_context,
     classifierAutoApprove: row.classifier_auto_approve,
     classifierEscalate: row.classifier_escalate,
   };
@@ -319,7 +315,7 @@ export async function listTools(connectionId: string): Promise<McpTool[]> {
 
   const rows = (await sql`
     select name, title, description, annotations, allowed, requires_approval,
-           classifier_enabled, classifier_system_prompt, classifier_context,
+           classifier_enabled, classifier_system_prompt,
            classifier_auto_approve, classifier_escalate
     from mcp_tools
     where connection_id = ${connectionId}
@@ -413,7 +409,6 @@ export async function saveToolAccess(
     name,
     classifier_enabled: settings.enabled,
     classifier_system_prompt: settings.systemPrompt,
-    classifier_context: settings.context,
     classifier_auto_approve: settings.autoApproveWhen,
     classifier_escalate: settings.escalateWhen,
   }));
@@ -422,12 +417,11 @@ export async function saveToolAccess(
     `update mcp_tools t
      set classifier_enabled      = r.classifier_enabled,
          classifier_system_prompt = r.classifier_system_prompt,
-         classifier_context       = r.classifier_context,
          classifier_auto_approve  = r.classifier_auto_approve,
          classifier_escalate      = r.classifier_escalate
      from jsonb_to_recordset($2::jsonb) as r(
        name text, classifier_enabled boolean, classifier_system_prompt text,
-       classifier_context text, classifier_auto_approve text, classifier_escalate text
+       classifier_auto_approve text, classifier_escalate text
      )
      where t.connection_id = $1 and t.name = r.name`,
     [connectionId, JSON.stringify(rows)],

@@ -266,7 +266,6 @@ export async function saveToolAccessAction(
       {
         enabled: classifierOn.has(name),
         systemPrompt: strOrNull(formData.get(`classifierPrompt:${name}`)),
-        context: strOrNull(formData.get(`classifierContext:${name}`)),
         autoApproveWhen: strOrNull(formData.get(`classifierAutoApprove:${name}`)),
         escalateWhen: strOrNull(formData.get(`classifierEscalate:${name}`)),
       },

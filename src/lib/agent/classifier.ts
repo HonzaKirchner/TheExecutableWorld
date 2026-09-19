@@ -7,8 +7,6 @@ const JEV_URL = "https://api.typesafe.ai/v1/systemone";
 
 export type ClassifierConfig = {
   systemPrompt: string | null;
-  /** What the tool is for, in the person's own words. */
-  context: string | null;
   autoApproveWhen: string | null;
   escalateWhen: string | null;
 };
@@ -51,7 +49,6 @@ export async function classifyToolCall(input: {
 
   const instructions = [
     input.config.systemPrompt?.trim(),
-    input.config.context?.trim() ? `About this tool: ${input.config.context!.trim()}` : null,
     input.config.autoApproveWhen?.trim()
       ? `Auto-approve when: ${input.config.autoApproveWhen!.trim()}`
       : null,

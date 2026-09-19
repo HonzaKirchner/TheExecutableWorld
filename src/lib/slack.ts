@@ -102,3 +102,60 @@ export async function slackPost<T extends SlackResponse>(
 
   return payload;
 }
+
+export type SlackChannel = {
+  id: string;
+  name?: string;
+  is_private?: boolean;
+  is_member?: boolean;
+  is_archived?: boolean;
+  num_members?: number;
+  topic?: { value?: string };
+  purpose?: { value?: string };
+};
+
+export type SlackMember = {
+  id: string;
+  name?: string;
+  real_name?: string;
+  deleted?: boolean;
+  is_bot?: boolean;
+  tz?: string;
+  profile?: { display_name?: string; real_name?: string; title?: string };
+};
+
+/** Slack pages at most this far through a list. Workspaces bigger than this get the first pages. */
+const MAX_PAGES = 5;
+
+export async function slackPaginate<T>(
+  token: string,
+  method: string,
+  key: string,
+  form: Record<string, string>,
+): Promise<T[]> {
+  const items: T[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const response = await slackPost<{
+      ok: true;
+      response_metadata?: { next_cursor?: string };
+      [key: string]: unknown;
+    }>(method, { token, form: { ...form, limit: "200", ...(cursor ? { cursor } : {}) } });
+    const batch = response[key];
+    if (Array.isArray(batch)) items.push(...(batch as T[]));
+    cursor = response.response_metadata?.next_cursor || undefined;
+    if (!cursor) break;
+  }
+  return items;
+}
+
+export async function listSlackChannels(token: string) {
+  return slackPaginate<SlackChannel>(token, "conversations.list", "channels", {
+    types: "public_channel,private_channel",
+    exclude_archived: "true",
+  });
+}
+
+export async function listSlackUsers(token: string) {
+  return slackPaginate<SlackMember>(token, "users.list", "members", {});
+}
