@@ -11,6 +11,7 @@ import { GmailWatchError, startGmailWatch, stopGmailWatch } from "@/lib/gmail/wa
 import { DEFAULT_GMAIL_EVENTS, normalizeGmailEvents } from "@/lib/gmail-events";
 import { SlackApiError } from "@/lib/slack";
 import { updateSlackApp } from "@/lib/slack-apps";
+import { SlackConfigTokenError } from "@/lib/slack-config-token";
 import { normalizeSlackEvents } from "@/lib/slack-events-catalog";
 import {
   StripeApiError,
@@ -51,7 +52,7 @@ export async function saveSlackEventsAction(
 
   if (agent.slackAppId) {
     try {
-      await updateSlackApp(agent.slackAppId, {
+      await updateSlackApp(agent.workspaceId, agent.slackAppId, {
         handle: agent.handle,
         description: agent.description,
         eventsUrl: slackEventsUrl(trigger.id),
@@ -241,6 +242,9 @@ function gmailFailure(error: unknown) {
 }
 
 function slackFailure(error: unknown) {
+  // Changing the manifest needs the workspace's app configuration token, which
+  // can be gone or expired by now. Its own message says how to replace it.
+  if (error instanceof SlackConfigTokenError) return error.message;
   if (error instanceof SlackApiError) {
     return `Slack rejected the change (${error.code}).`;
   }

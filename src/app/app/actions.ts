@@ -14,15 +14,24 @@ import {
 import { createAgent, deleteAgent, isHandleTaken } from "@/lib/agents";
 import { isModelId } from "@/lib/models";
 import { SlackApiError } from "@/lib/slack";
+import {
+  SlackConfigTokenError,
+  hasConfigToken,
+  saveConfigRefreshToken,
+} from "@/lib/slack-config-token";
 import { createSlackApp, deleteSlackApp } from "@/lib/slack-apps";
 import { DEFAULT_SLACK_EVENTS } from "@/lib/slack-events-catalog";
 import { createTrigger, slackEventsUrl } from "@/lib/triggers";
 
 export type CreateAgentField =
+  | "configToken"
   | "handle"
   | "description"
   | "model"
   | "instructions";
+
+/** Everything but the token, which is a secret and never goes back to the client. */
+type CreateAgentValueField = Exclude<CreateAgentField, "configToken">;
 
 export type CreateAgentState = {
   status: "idle" | "error";
@@ -33,7 +42,13 @@ export type CreateAgentState = {
    * without this the fields would revert to empty and the person would have to
    * retype everything to fix one mistake.
    */
-  values?: Record<CreateAgentField, string>;
+  values?: Record<CreateAgentValueField, string>;
+  /**
+   * Set once this workspace's configuration token is stored, so a form that
+   * asked for one stops asking — the rest of the attempt may still have failed
+   * validation, and the pasted token is spent by then.
+   */
+  tokenAccepted?: boolean;
 };
 
 /** Slack's bot_user.display_name character set. */
@@ -58,9 +73,20 @@ export async function createAgentAction(
   const description = str(formData.get("description"));
   const model = str(formData.get("model"));
   const instructions = str(formData.get("instructions"));
+  const configToken = str(formData.get("configToken"));
 
   const values = { handle, description, model, instructions };
   const errors: Partial<Record<CreateAgentField, string>> = {};
+
+  // The app is created in whichever workspace the configuration token came
+  // from, so this workspace needs one of its own before it can have agents.
+  // The form asks for it when it's missing; `tokenAccepted` tells the form to
+  // stop asking, because storing it spends what was pasted.
+  let tokenAccepted = false;
+  const configured = await hasConfigToken(workspaceId);
+  if (!configured && !configToken) {
+    errors.configToken = "Paste an app configuration token to create agents here.";
+  }
 
   if (!handle) errors.handle = "Pick a Slack handle.";
   else if (handle.length > HANDLE_MAX)
@@ -90,20 +116,47 @@ export async function createAgentAction(
     };
   }
 
+  // Stored only once the rest of the form is known good: the first rotation
+  // invalidates the pasted token, so a form that still has mistakes in it
+  // shouldn't be allowed to spend one.
+  if (!configured) {
+    try {
+      await saveConfigRefreshToken(workspaceId, configToken);
+      tokenAccepted = true;
+    } catch (error) {
+      return {
+        status: "error",
+        errors: { configToken: configTokenFailureMessage(error) },
+        values,
+      };
+    }
+  }
+
   // The Slack trigger's id is the path of the webhook, and the webhook goes
   // into the app's manifest — so the id has to exist before either row does.
   const triggerId = randomUUID();
 
   let slackApp;
   try {
-    slackApp = await createSlackApp({
+    slackApp = await createSlackApp(workspaceId, {
       handle,
       description: description || null,
       eventsUrl: slackEventsUrl(triggerId),
       events: DEFAULT_SLACK_EVENTS,
     });
   } catch (error) {
-    return { status: "error", message: slackAppFailureMessage(error), values };
+    // A token that died between the check above and here is a field problem,
+    // not a Slack outage — the form asks for a new one rather than telling
+    // the person to try again.
+    if (error instanceof SlackConfigTokenError) {
+      return {
+        status: "error",
+        errors: { configToken: error.message },
+        values,
+        tokenAccepted: false,
+      };
+    }
+    return { status: "error", message: slackAppFailureMessage(error), values, tokenAccepted };
   }
 
   let agent;
@@ -130,7 +183,7 @@ export async function createAgentAction(
   } catch (error) {
     // The Slack app exists but nothing points at it any more. Clean it up so
     // the handle stays free and the workspace doesn't collect orphans.
-    await deleteSlackApp(slackApp.appId).catch(() => {});
+    await deleteSlackApp(workspaceId, slackApp.appId).catch(() => {});
     throw error;
   }
 
@@ -142,6 +195,11 @@ export async function createAgentAction(
 
 function str(value: FormDataEntryValue | null) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function configTokenFailureMessage(error: unknown) {
+  if (error instanceof SlackConfigTokenError) return error.message;
+  return error instanceof Error ? error.message : "That token could not be saved.";
 }
 
 function slackAppFailureMessage(error: unknown) {

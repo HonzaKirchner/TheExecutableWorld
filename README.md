@@ -32,7 +32,6 @@ Everything under `/app` is gated by [src/proxy.ts](src/proxy.ts); signed-out vis
    | `SLACK_CLIENT_SECRET`  | Slack app → Basic Information → Client Secret   | yes      |
    | `SLACK_SIGNING_SECRET` | Slack app → Basic Information → Signing Secret  | not yet  |
    | `SLACK_APP_ID`         | Slack app → Basic Information → App ID          | not yet  |
-   | `SLACK_CONFIG_ACCESS_TOKEN` / `SLACK_CONFIG_REFRESH_TOKEN` | api.slack.com/apps → Your App Configuration Tokens — the pair as generated; see [App configuration tokens](#app-configuration-tokens) | to create agents |
    | `APP_BASE_URL`         | Origin for OAuth redirect URLs (see below)      | optional |
    | `PUBLIC_BASE_URL`      | Internet-reachable origin for Slack event delivery; defaults to the Vercel production URL | locally, to create agents |
    | `DB_CONNECTION_STRING` | Neon → connection string                        | yes      |
@@ -150,6 +149,7 @@ Seven tables, created by [src/lib/db.ts](src/lib/db.ts):
 | `mcp_tools`           | (connection, tool name)   | The server's tools as last listed, with `allowed` and `requires_approval` |
 | `triggers`            | `uuid`, unique per (agent, kind) | What makes an agent act: `config.events`, `status`, and for Stripe the connected `account_id` and the last event seen |
 | `stripe_webhook_endpoint` | `'default'`           | The platform's one Connect webhook endpoint at Stripe, with its signing secret |
+| `slack_config_tokens` | Slack team id             | That workspace's current app configuration token pair — the workspace its agents' Slack apps are created in |
 
 ### Secrets are encrypted
 
@@ -211,9 +211,11 @@ the agent follows and are shown first on its page. Submitting the dialog runs
    so the form and the action agree;
 3. rejects a handle already used in the workspace *before* calling Slack, because app
    creation is rate limited and an orphaned app has to be cleaned up by hand;
-4. creates a Slack app from a manifest via `apps.manifest.create` — with event
+4. stores the workspace's app configuration token if the dialog asked for one (below) —
+   after the other fields are known good, because saving it spends it;
+5. creates a Slack app from a manifest via `apps.manifest.create` — with event
    subscriptions pointing at the agent's webhook (below);
-5. stores the agent and its Slack trigger with the credentials Slack hands back, and
+6. stores the agent and its Slack trigger with the credentials Slack hands back, and
    redirects to its page.
 
 If the insert fails after the app exists, the app is deleted again so the workspace
@@ -222,26 +224,33 @@ doesn't collect orphans.
 ### App configuration tokens
 
 `apps.manifest.create` doesn't authenticate with a bot or user token, and you can't get
-its token through OAuth. Generate a pair by hand under **Your App Configuration Tokens**
-at [api.slack.com/apps](https://api.slack.com/apps) and put both halves in the
-environment:
+its token through OAuth. Someone generates the pair by hand under **Your App
+Configuration Tokens** at [api.slack.com/apps](https://api.slack.com/apps).
 
-```ini
-SLACK_CONFIG_ACCESS_TOKEN=xoxe.xoxp-1-...   # good for 12 hours
-SLACK_CONFIG_REFRESH_TOKEN=xoxe-1-...       # swaps for a fresh pair
-```
+**The pair decides which workspace the app is created in.** `apps.manifest.create` takes
+no team parameter, so an app is born wherever its configuration token came from. A single
+shared pair would create every customer's agents in whichever workspace generated it —
+undistributed, and so impossible for that customer to install. So the pair is stored per
+workspace in `slack_config_tokens` (one row per Slack team id), and there is no
+environment fallback.
 
-Nothing is stored in the database. [src/lib/slack-config-token.ts](src/lib/slack-config-token.ts)
-uses the access token from the environment until Slack rejects it, then rotates with the
-refresh token and keeps the new pair in memory for the life of the process. Slack
-invalidates a refresh token the moment it is used, so after the first rotation the
-environment holds a dead one: a new process (a cold start, a redeploy, a restarted
-`next dev`) gets by on the access token while that is still valid, and once it isn't,
-creating or deleting an agent fails with a message saying so. The fix is always the
-same — generate a new pair at api.slack.com/apps and update both variables.
+A workspace with no pair can't create agents. The "New agent" dialog notices and asks for
+a refresh token before the rest of the form; `/app` passes `needsConfigToken` to
+[src/components/new-agent-dialog.tsx](src/components/new-agent-dialog.tsx). Whoever pastes
+it must have generated it while signed in to *that* workspace — nothing here can check
+that, but a token from elsewhere puts the apps in the wrong place again.
 
-The pair belongs to the workspace it was generated in, which is also the workspace new
-apps are created in.
+The token is rotated the moment it's pasted: that both proves it is real and is
+unavoidable anyway, since the first rotation is what yields an access token and
+invalidates what was pasted. From there
+[src/lib/slack-config-token.ts](src/lib/slack-config-token.ts) keeps it alive — the access
+token lasts 12 hours, and every rotation invalidates the refresh token it came from, so
+the current pair is written back. A rotation Slack rejects means the pair is dead: the row
+is deleted, and the dialog asks for a new one the next time round. `SlackConfigTokenError`
+carries that as a message the forms show directly.
+
+There is no way to replace a workspace's pair while it still rotates — that would want a
+settings page, which doesn't exist yet.
 
 ## Triggers
 
@@ -539,10 +548,10 @@ cancellations as a passing toast. Nothing from the URL is rendered as-is.
 
 ## Deploying to Vercel
 
-Set `AUTH_SECRET`, `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `DB_CONNECTION_STRING`,
-`SLACK_CONFIG_ACCESS_TOKEN` and `SLACK_CONFIG_REFRESH_TOKEN` as project environment
-variables. `AUTH_URL` is detected
-automatically. Add the production callback URL
+Set `AUTH_SECRET`, `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `DB_CONNECTION_STRING` and
+`ENCRYPTION_KEY` as project environment variables. `AUTH_URL` is detected
+automatically. App configuration tokens are *not* environment variables — each workspace
+pastes its own through the app (above). Add the production callback URL
 (`https://<your-domain>/api/auth/callback/slack`) to the Slack app.
 
 [vercel.json](vercel.json) pins the framework preset to `nextjs`. This matters when the
@@ -578,7 +587,7 @@ src/
     agents.ts                   Workspace and agent queries
     models.ts                   The models an agent can run on
     slack.ts                    Slack Web API wrapper
-    slack-config-token.ts       App configuration token (env + in-memory rotation)
+    slack-config-token.ts       App configuration token pair per workspace, rotated
     slack-apps.ts               App manifest (scopes, events) -> apps.manifest.create
     slack-install.ts            Install URL + oauth.v2.access
     slack-events.ts             Signature check, event shapes, reply

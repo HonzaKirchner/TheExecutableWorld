@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useId, useState } from "react";
-import { Loader2, Plus } from "lucide-react";
+import { KeyRound, Loader2, Plus } from "lucide-react";
 
 import { createAgentAction, type CreateAgentState } from "@/app/app/actions";
 import { DEFAULT_MODEL, MODELS } from "@/lib/models";
@@ -34,7 +34,18 @@ import { Textarea } from "@/components/ui/textarea";
 
 const INITIAL_STATE: CreateAgentState = { status: "idle" };
 
-export function NewAgentDialog() {
+const CONFIG_TOKEN_URL = "https://api.slack.com/apps";
+
+export function NewAgentDialog({
+  needsConfigToken = false,
+}: {
+  /**
+   * This workspace has no Slack app configuration token yet, so the first
+   * agent can't be created without one. Agents are created as apps *in* the
+   * workspace the token came from, which is why it can't be ours.
+   */
+  needsConfigToken?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   // Bumped on close so a reopened dialog starts from a blank form rather than
   // the errors left over from the last attempt.
@@ -64,13 +75,13 @@ export function NewAgentDialog() {
           </DialogDescription>
         </DialogHeader>
 
-        <NewAgentForm key={formKey} />
+        <NewAgentForm key={formKey} needsConfigToken={needsConfigToken} />
       </DialogContent>
     </Dialog>
   );
 }
 
-function NewAgentForm() {
+function NewAgentForm({ needsConfigToken }: { needsConfigToken: boolean }) {
   // On success the action redirects to the new agent, so the only state that
   // ever comes back here is an error.
   const [state, formAction, pending] = useActionState(
@@ -78,13 +89,59 @@ function NewAgentForm() {
     INITIAL_STATE,
   );
 
+  const configTokenId = useId();
   const handleId = useId();
   const descriptionId = useId();
   const modelId = useId();
   const instructionsId = useId();
 
+  // Storing a token spends it, so once the action reports one was accepted the
+  // field goes away even though the attempt as a whole may have failed.
+  const askForToken = needsConfigToken && !state.tokenAccepted;
+
   return (
     <form action={formAction} className="grid gap-5">
+      {askForToken ? (
+        <div className="grid gap-4 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+          <div className="flex gap-3">
+            <KeyRound className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-500" />
+            <div className="grid gap-1">
+              <p className="text-sm font-medium">Set up this workspace first</p>
+              <p className="text-xs text-muted-foreground">
+                Your coworkers are created as Slack apps in your own workspace,
+                which needs an app configuration token. Generate one under{" "}
+                <a
+                  href={CONFIG_TOKEN_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium underline underline-offset-2 hover:text-foreground"
+                >
+                  Your App Configuration Tokens
+                </a>{" "}
+                while signed in to this workspace, then paste the refresh token
+                here. You only do this once.
+              </p>
+            </div>
+          </div>
+
+          <Field id={configTokenId} label="Refresh token" error={state.errors?.configToken}>
+            <Input
+              id={configTokenId}
+              name="configToken"
+              type="password"
+              placeholder="xoxe-1-…"
+              required
+              autoFocus
+              spellCheck={false}
+              autoComplete="off"
+              autoCapitalize="none"
+              className="font-mono"
+              aria-invalid={Boolean(state.errors?.configToken)}
+            />
+          </Field>
+        </div>
+      ) : null}
+
       <Field
         id={handleId}
         label="Handle"
@@ -101,7 +158,7 @@ function NewAgentForm() {
             defaultValue={state.values?.handle}
             placeholder="ada"
             maxLength={HANDLE_MAX}
-            autoFocus
+            autoFocus={!askForToken}
             required
             spellCheck={false}
             autoCapitalize="none"
