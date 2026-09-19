@@ -68,7 +68,7 @@ export const MCP_SERVERS: readonly McpServerDefinition[] = [
     },
     resourceIndicator: false,
     noAuthorization:
-      "Slack no longer honours the agent's bot token. Reinstall the app from the agent's page.",
+      "The agent's Slack app isn't installed, or Slack no longer honours its bot token. Install it from the agent's page.",
   },
   {
     id: "apify",

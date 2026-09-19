@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowUpRight, CircleAlert, CircleCheck } from "lucide-react"
 import { auth } from "@/auth";
 import { getAgent } from "@/lib/agents";
 import { listConnections } from "@/lib/mcp/connections";
+import { isGmailAvailable } from "@/lib/gmail/connection";
 import { allowedSlackTools } from "@/lib/slack-access";
 import { listAgentSessions } from "@/lib/sessions";
 import { missingScopes } from "@/lib/slack-events-catalog";
@@ -30,6 +31,9 @@ const ERRORS: Record<string, string> = {
     "The app was installed into a different Slack workspace than this agent belongs to, so the install was undone. Pick this workspace when Slack asks.",
 };
 
+/** How many runs the agent's page shows before pointing at the sessions page. */
+const RECENT_SESSIONS = 5;
+
 const CANCELLATIONS: Record<string, string> = {
   mcp_denied: "Authorization was declined — nothing was connected.",
   slack_denied: "The Slack install was cancelled.",
@@ -47,13 +51,17 @@ export default async function AgentDetailPage({
 
   if (!agent) notFound();
 
-  const [connections, triggers, stripeConnection, slackTools, sessions] = await Promise.all([
-    listConnections(agent.id),
-    listTriggers(agent.id),
-    getStripeConnection(agent.workspaceId),
-    allowedSlackTools(agent.id),
-    listAgentSessions(agent.id),
-  ]);
+  // Until the app is installed nothing can wake the agent, so there are no
+  // sessions to show — and the page shouldn't suggest otherwise.
+  const [connections, triggers, stripeConnection, slackTools, sessions, gmailAvailable] =
+    await Promise.all([
+      listConnections(agent.id),
+      listTriggers(agent.id),
+      getStripeConnection(agent.workspaceId),
+      allowedSlackTools(agent.id),
+      agent.slackInstalledAt ? listAgentSessions(agent.id, RECENT_SESSIONS) : Promise.resolve([]),
+      isGmailAvailable(agent),
+    ]);
   const installed = query.installed === "1";
   const slackTrigger = triggers.find((trigger) => trigger.kind === "slack");
   // Events and allowed Slack tools both need scopes; the install has to
@@ -141,13 +149,13 @@ export default async function AgentDetailPage({
       <TriggersSection
         agent={agent}
         triggers={triggers}
-        gmailConnected={connections.some(
-          (connection) => connection.serverId === "gmail" && connection.status === "authorized",
-        )}
+        gmailConnected={gmailAvailable}
         stripeConnection={stripeConnection}
       />
 
-      <SessionsSection sessions={sessions} />
+      {agent.slackInstalledAt ? (
+        <SessionsSection agentId={agent.id} sessions={sessions} limit={RECENT_SESSIONS} />
+      ) : null}
 
       <AccessSection agent={agent} connections={connections} />
 

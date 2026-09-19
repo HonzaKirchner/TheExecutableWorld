@@ -50,6 +50,37 @@ export type CreateAgentState = {
 /** Slack's bot_user.display_name character set. */
 const HANDLE_RE = /^[a-z0-9._-]+$/;
 
+export type ConfigTokenState = { error?: string; saved?: boolean };
+
+/**
+ * Stores the workspace's app configuration token on its own — the setup
+ * dialog that opens after sign-in. Saving rotates the token at Slack, which
+ * both checks it and spends what was pasted (see `saveConfigRefreshToken`).
+ */
+export async function saveConfigTokenAction(
+  _previous: ConfigTokenState,
+  formData: FormData,
+): Promise<ConfigTokenState> {
+  const session = await auth();
+  const workspaceId = session?.slack?.teamId;
+  if (!workspaceId) {
+    return { error: "Your session has expired. Sign in again." };
+  }
+
+  const configToken = str(formData.get("configToken"));
+  if (!configToken) return { error: "Paste the refresh token." };
+
+  try {
+    await saveConfigRefreshToken(workspaceId, configToken);
+  } catch (error) {
+    return { error: configTokenFailureMessage(error) };
+  }
+
+  // The layout decides whether to show the dialog, so it has to see the change.
+  revalidatePath("/app", "layout");
+  return { saved: true };
+}
+
 export async function createAgentAction(
   _previous: CreateAgentState,
   formData: FormData,

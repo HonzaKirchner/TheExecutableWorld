@@ -8,6 +8,7 @@ import { describeConnection, getMcpServer, isCustomServerId } from "@/lib/mcp/ca
 import { connectAndListTools, type ConnectResult } from "@/lib/mcp/client";
 import { getConnection, listTools, syncTools } from "@/lib/mcp/connections";
 import { suggestApproval } from "@/lib/mcp/tools";
+import { slackCatalogTools } from "@/lib/slack-access";
 import { DisconnectServerButton } from "@/components/access/disconnect-server-button";
 import { ServerMark } from "@/components/access/server-mark";
 import { ToolAccessForm } from "@/components/access/tool-access-form";
@@ -30,11 +31,16 @@ export default async function ToolAccessPage({
   // Ask the server for its current tools each time the page opens: servers
   // add and rename tools, and a stale list would let people allow things that
   // no longer exist. If the server can't be reached, fall back to the last
-  // list we saved and say so.
+  // list we saved and say so. Slack is the exception: its server is this
+  // app's own and its tool list a catalog here, so there is nothing to ask —
+  // which is also what lets its tools be chosen before the app is installed.
   let result: ConnectResult | undefined;
   let warning: string | undefined;
   try {
-    result = await connectAndListTools(connection);
+    result =
+      server.id === "slack"
+        ? { status: "authorized", tools: slackCatalogTools() }
+        : await connectAndListTools(connection);
   } catch (error) {
     console.error(`Refreshing tools from ${server.id} failed`, error);
     warning = `${server.name} couldn't be reached just now. This is the list from ${

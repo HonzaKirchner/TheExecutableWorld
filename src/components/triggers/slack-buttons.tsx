@@ -1,47 +1,13 @@
 "use client";
 
 import { useActionState } from "react";
-import { Loader2, Unplug, Wrench } from "lucide-react";
+import { Loader2, Unplug } from "lucide-react";
 
-import {
-  connectMcpServerAction,
-  type AccessActionState,
-} from "@/app/app/[agentId]/access/actions";
 import {
   stopSlackEventsAction,
   type TriggerActionState,
 } from "@/app/app/[agentId]/triggers/actions";
 import { Button } from "@/components/ui/button";
-
-/**
- * Gives the agent its Slack *tools* — the same step as the Slack card under
- * Access, offered on the trigger page because being woken by Slack and
- * acting in it are two grants. No authorization to go through: the
- * connection takes the bot token the install granted, and lands on the
- * tool page.
- */
-export function ConnectSlackToolsButton({ agentId }: { agentId: string }) {
-  const [state, formAction, pending] = useActionState<AccessActionState, FormData>(
-    connectMcpServerAction,
-    {},
-  );
-
-  return (
-    <form action={formAction} className="flex flex-col items-start gap-2">
-      <input type="hidden" name="agentId" value={agentId} />
-      <input type="hidden" name="serverId" value="slack" />
-      <Button type="submit" variant="outline" disabled={pending} className="gap-2">
-        {pending ? <Loader2 className="size-4 animate-spin" /> : <Wrench className="size-4" />}
-        {pending ? "Connecting…" : "Connect Slack tools"}
-      </Button>
-      {state.error ? (
-        <p aria-live="polite" className="text-sm text-destructive">
-          {state.error}
-        </p>
-      ) : null}
-    </form>
-  );
-}
 
 /** The agent stops listening to Slack. Its app stays installed, its tools keep working. */
 export function StopSlackEventsButton({ agentId }: { agentId: string }) {

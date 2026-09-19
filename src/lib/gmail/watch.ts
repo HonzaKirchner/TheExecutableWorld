@@ -10,6 +10,7 @@ import {
 } from "@/lib/gmail/api";
 import { bearerFromConnection, GoogleAuthError, gmailPubSubTopic } from "@/lib/gmail/google";
 import { getGmailEvent, gmailLabelIdsFor, normalizeGmailEvents } from "@/lib/gmail-events";
+import { ensureGmailConnection } from "@/lib/gmail/connection";
 import { getConnection } from "@/lib/mcp/connections";
 import {
   countOtherGmailTriggers,
@@ -56,9 +57,14 @@ export class GmailWatchError extends Error {
   }
 }
 
+/**
+ * The agent's own Gmail connection — or, for an agent that has none, the
+ * workspace's grant taken over on the spot, so an account connected once
+ * serves every agent (see src/lib/gmail/connection.ts).
+ */
 async function authorizedConnection(agentId: string) {
-  const connection = await getConnection(agentId, "gmail");
-  if (!connection || connection.status !== "authorized") {
+  const connection = await ensureGmailConnection(agentId);
+  if (!connection) {
     throw new GmailWatchError("Connect Gmail under Access first — the trigger listens on that account.");
   }
   return connection;

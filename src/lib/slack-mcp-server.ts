@@ -20,9 +20,12 @@ import { getSlackTool } from "@/lib/slack-tools-catalog";
  * src/lib/slack-access.ts.
  *
  * Which tools may be called is decided per agent under Access, as for any
- * server. Each tool needs bot scopes (src/lib/slack-tools-catalog.ts) that
- * the install asks for only once the tool is allowed, so a tool allowed
- * after the install answers `missing_scope` until the app is installed again.
+ * server — and, unlike any other server, before the app is installed: the
+ * tool list is the catalog in src/lib/slack-tools-catalog.ts, which is also
+ * where each tool's title, description, annotations and bot scopes come
+ * from. The install asks for a tool's scopes only once the tool is allowed,
+ * so a tool allowed after the install answers `missing_scope` until the app
+ * is installed again.
  *
  * Stateless: one server and transport per request, nothing kept between.
  */
@@ -97,25 +100,26 @@ const SERVER_INFO = { name: "slack", version: "0.1.0" };
 /** Slack ids: channels (C…), private channels (G…), DMs (D…), people (U…/W…). */
 const SLACK_ID = /^[A-Z][A-Z0-9]{5,}$/;
 
+/** What the catalog says about a tool; the server adds only the argument schema. */
+function meta(name: string) {
+  const tool = getSlackTool(name);
+  if (!tool) throw new Error(`Slack tool ${name} is not in the catalog.`);
+  return { title: tool.title, description: tool.description, annotations: tool.annotations };
+}
+
 function createSlackServer() {
   const server = new McpServer(SERVER_INFO);
 
   server.registerTool(
     "send_message",
-    {
-      title: "Send message",
-      description:
-        "Post a message as the agent, to a channel it's in or as a direct message to a person. Pass thread_ts to reply in a thread. Text is Slack mrkdwn: *bold*, _italic_, <@U…> to mention.",
-      inputSchema: {
+    { ...meta("send_message"), inputSchema: {
         channel: z
           .string()
           .regex(SLACK_ID)
           .describe("A channel id (C…/G…/D…) or a person's user id (U…/W…) for a DM."),
         text: z.string().min(1),
         thread_ts: z.string().optional().describe("The ts of the message to reply under."),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false },
-    },
+      } },
     withSlack("send_message", async (token, { channel, text, thread_ts }) => {
       const target = await channelFor(token, channel);
       const posted = await slackPost<{ ok: true; channel: string; ts: string }>(
@@ -128,16 +132,10 @@ function createSlackServer() {
 
   server.registerTool(
     "list_channels",
-    {
-      title: "List channels",
-      description:
-        "The workspace's public channels and the private ones the agent is in, with whether it's a member of each. Filter by a part of the name.",
-      inputSchema: {
+    { ...meta("list_channels"), inputSchema: {
         query: z.string().default("").describe("A part of the channel name; empty lists them all."),
         max_results: z.number().int().min(1).max(200).default(50),
-      },
-      annotations: { readOnlyHint: true },
-    },
+      } },
     withSlack("list_channels", async (token, { query, max_results }) => {
       const needle = query.trim().toLowerCase().replace(/^#/, "");
       const channels = await listConversations(token);
@@ -159,13 +157,7 @@ function createSlackServer() {
 
   server.registerTool(
     "join_channel",
-    {
-      title: "Join channel",
-      description:
-        "Join a public channel so the agent can read and post there. Private channels need a person to invite the agent.",
-      inputSchema: { channel: z.string().regex(SLACK_ID) },
-      annotations: { readOnlyHint: false, destructiveHint: false },
-    },
+    { ...meta("join_channel"), inputSchema: { channel: z.string().regex(SLACK_ID) } },
     withSlack("join_channel", async (token, { channel }) => {
       const joined = await slackPost<{ ok: true; channel: { id: string; name?: string } }>(
         "conversations.join",
@@ -177,17 +169,11 @@ function createSlackServer() {
 
   server.registerTool(
     "read_channel",
-    {
-      title: "Read channel",
-      description:
-        "The latest messages in a channel the agent is in, newest first. Threads show only their first message; use read_thread for the replies.",
-      inputSchema: {
+    { ...meta("read_channel"), inputSchema: {
         channel: z.string().regex(SLACK_ID),
         max_results: z.number().int().min(1).max(100).default(20),
         oldest: z.string().optional().describe("Only messages after this ts."),
-      },
-      annotations: { readOnlyHint: true },
-    },
+      } },
     withSlack("read_channel", async (token, { channel, max_results, oldest }) => {
       const history = await slackPost<{ ok: true; messages?: RawMessage[] }>(
         "conversations.history",
@@ -202,16 +188,11 @@ function createSlackServer() {
 
   server.registerTool(
     "read_thread",
-    {
-      title: "Read thread",
-      description: "Every message in a thread, oldest first, starting with the one it hangs off.",
-      inputSchema: {
+    { ...meta("read_thread"), inputSchema: {
         channel: z.string().regex(SLACK_ID),
         thread_ts: z.string().describe("The ts of the thread's first message."),
         max_results: z.number().int().min(1).max(200).default(50),
-      },
-      annotations: { readOnlyHint: true },
-    },
+      } },
     withSlack("read_thread", async (token, { channel, thread_ts, max_results }) => {
       const replies = await slackPost<{ ok: true; messages?: RawMessage[] }>(
         "conversations.replies",
@@ -223,16 +204,10 @@ function createSlackServer() {
 
   server.registerTool(
     "find_user",
-    {
-      title: "Find user",
-      description:
-        "Look people up by name, handle or display name. Returns their ids, for mentioning them or sending a DM.",
-      inputSchema: {
+    { ...meta("find_user"), inputSchema: {
         query: z.string().min(1).describe("A part of the person's name or handle."),
         max_results: z.number().int().min(1).max(50).default(10),
-      },
-      annotations: { readOnlyHint: true },
-    },
+      } },
     withSlack("find_user", async (token, { query, max_results }) => {
       const needle = query.trim().toLowerCase().replace(/^@/, "");
       const members = await listMembers(token);
@@ -258,16 +233,11 @@ function createSlackServer() {
 
   server.registerTool(
     "add_reaction",
-    {
-      title: "Add reaction",
-      description: "React to a message with an emoji, by its name without colons (e.g. eyes, white_check_mark).",
-      inputSchema: {
+    { ...meta("add_reaction"), inputSchema: {
         channel: z.string().regex(SLACK_ID),
         timestamp: z.string().describe("The ts of the message."),
         name: z.string().regex(/^[a-z0-9_+-]+$/),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false },
-    },
+      } },
     withSlack("add_reaction", async (token, { channel, timestamp, name }) => {
       await slackPost("reactions.add", { token, form: { channel, timestamp, name } });
       return json({ reacted: true });

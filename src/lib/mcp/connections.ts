@@ -183,6 +183,50 @@ export async function getConnection(
 }
 
 /**
+ * The most recently authorized connection to `serverId` held by *another*
+ * agent of the workspace, if any — the grant a new agent can take over
+ * rather than asking the person for it again (see src/lib/gmail/connection.ts).
+ */
+export async function findWorkspaceConnection(
+  workspaceId: string,
+  serverId: string,
+  exceptAgentId: string,
+): Promise<McpConnection | null> {
+  await ensureSchema();
+  const sql = db();
+
+  const rows = (await sql.query(
+    `select c.id, c.agent_id, c.server_id, c.server_url, c.name, c.status,
+            c.tools_synced_at, c.created_at
+     from mcp_connections c
+     join agents a on a.id = c.agent_id
+     where a.workspace_id = $1 and c.server_id = $2 and c.status = 'authorized'
+       and c.agent_id <> $3
+     order by c.tools_synced_at desc nulls last, c.created_at desc
+     limit 1`,
+    [workspaceId, serverId, exceptAgentId],
+  )) as ConnectionRow[];
+
+  return rows[0] ? toConnection(rows[0]) : null;
+}
+
+/**
+ * Gives one connection another's OAuth material — the registered client,
+ * the token pair and the discovered endpoints. Nothing in flight comes
+ * along: the target starts with no `state` and no verifier.
+ */
+export async function copyCredentials(fromConnectionId: string, toConnectionId: string) {
+  const source = await loadCredentials(fromConnectionId);
+  await updateCredentials(toConnectionId, {
+    clientInformation: source.clientInformation,
+    tokens: source.tokens,
+    discovery: source.discovery,
+    oauthState: null,
+    codeVerifier: null,
+  });
+}
+
+/**
  * Resolves the `state` an authorization server sent back. Returns the agent's
  * workspace too, so the callback can check it against the session before
  * doing anything with the code.

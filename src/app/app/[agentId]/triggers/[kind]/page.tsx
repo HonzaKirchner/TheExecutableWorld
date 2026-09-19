@@ -4,6 +4,7 @@ import { ArrowLeft, ChevronRight, CircleAlert, CircleCheck, Zap } from "lucide-r
 
 import { auth } from "@/auth";
 import { getAgent } from "@/lib/agents";
+import { isGmailAvailable } from "@/lib/gmail/connection";
 import { gmailPushUrl, isGmailTriggerConfigured } from "@/lib/gmail/google";
 import { GMAIL_EVENTS } from "@/lib/gmail-events";
 import { getConnection, listTools } from "@/lib/mcp/connections";
@@ -39,16 +40,12 @@ import {
   DisconnectStripeButton,
   StopStripeEventsButton,
 } from "@/components/triggers/stripe-buttons";
-import { ConnectSlackToolsButton, StopSlackEventsButton } from "@/components/triggers/slack-buttons";
+import { StopSlackEventsButton } from "@/components/triggers/slack-buttons";
 import { TriggerEventsForm } from "@/components/triggers/trigger-events-form";
-import { InstallSlackButton } from "@/components/access/install-slack-button";
 import { Badge } from "@/components/ui/badge";
 
 /** The tool on Stripe's MCP server that performs every write, refunds included. */
 const STRIPE_WRITE_TOOL = "stripe_api_write";
-
-/** The tool on this app's Slack MCP server that posts as the agent. */
-const SLACK_SEND_TOOL = "send_message";
 
 const ERRORS: Record<string, string> = {
   stripe_failed: "Stripe didn't complete the connection. Try again.",
@@ -189,8 +186,9 @@ async function GmailDetail({
     );
   }
 
-  const connection = await getConnection(agent.id, "gmail");
-  if (connection?.status !== "authorized") {
+  // The agent's own grant, or one another agent of the workspace holds —
+  // "Start listening" takes that over without a trip to Google.
+  if (!(await isGmailAvailable(agent))) {
     return (
       <section className="mt-8 rounded-2xl border border-rose-200/70 bg-gradient-to-br from-rose-50 via-orange-50/60 to-amber-50/50 px-6 py-8 sm:px-8 dark:border-rose-900/50 dark:from-rose-950/40 dark:via-orange-950/20 dark:to-amber-950/10">
         <h2 className="text-lg font-semibold tracking-tight">Connect Gmail first</h2>
@@ -295,42 +293,21 @@ async function SlackDetail({
 }) {
   // The tools allowed under Access need scopes of their own; the install has
   // to cover them along with the events, so the form shows both.
-  const [allowedTools, connection] = await Promise.all([
-    allowedSlackTools(agent.id),
-    getConnection(agent.id, "slack"),
-  ]);
+  const allowedTools = await allowedSlackTools(agent.id);
   const missing = agent.slackInstalledAt
     ? missingScopes(trigger?.events ?? [], agent.slackBotScopes, allowedTools)
     : [];
 
   return (
     <>
-      {agent.slackInstalledAt ? null : (
-        <section className="mt-8 rounded-2xl border border-violet-200/70 bg-gradient-to-br from-violet-50 via-fuchsia-50/60 to-rose-50/50 px-6 py-8 sm:px-8 dark:border-violet-900/50 dark:from-violet-950/40 dark:via-fuchsia-950/20 dark:to-rose-950/10">
-          <h2 className="text-lg font-semibold tracking-tight">@{agent.handle} isn&apos;t in Slack yet</h2>
-          <p className="mt-1 max-w-lg text-sm text-muted-foreground">
-            Events reach the agent only once its app is installed in the workspace. You can
-            choose them first — the install then asks for exactly the permissions they need —
-            or install now and come back.
-          </p>
-          <div className="mt-5">
-            <InstallSlackButton agentId={agent.id} accent returnTo="trigger" align="start" />
-          </div>
-        </section>
-      )}
-
       <dl className="mt-8 grid gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-[1fr_2fr]">
         <Field label="Status">
           {!trigger ? (
             <Dot tone="amber">Not listening</Dot>
-          ) : agent.slackInstalledAt ? (
-            missing.length > 0 ? (
-              <Dot tone="amber">Reinstall needed</Dot>
-            ) : (
-              <Dot tone="emerald">Active</Dot>
-            )
+          ) : missing.length > 0 ? (
+            <Dot tone="amber">Reinstall needed</Dot>
           ) : (
-            <Dot tone="amber">Not installed</Dot>
+            <Dot tone="emerald">Active</Dot>
           )}
           {!trigger ? (
             <span className="mt-1 block text-xs text-muted-foreground">
@@ -398,77 +375,7 @@ async function SlackDetail({
         allowedTools={allowedTools}
       />
 
-      <SlackActions agent={agent} connection={connection} allowedTools={allowedTools} />
     </>
-  );
-}
-
-/**
- * Being woken by Slack and acting in it are two grants, as with Stripe:
- * events come from the app's subscription above, actions from this app's
- * own Slack MCP server, connected like any server under Access — except
- * that it needs no authorization of its own, since it speaks with the bot
- * token the install granted. The same card, placed where the question comes
- * up.
- */
-async function SlackActions({
-  agent,
-  connection,
-  allowedTools,
-}: {
-  agent: Awaited<ReturnType<typeof getAgent>> & object;
-  connection: Awaited<ReturnType<typeof getConnection>>;
-  allowedTools: string[];
-}) {
-  const authorized = connection?.status === "authorized";
-  const tools = authorized ? await listTools(connection.id) : [];
-  const send = tools.find((tool) => tool.name === SLACK_SEND_TOOL);
-
-  return (
-    <section className="mt-10">
-      <h2 className="text-lg font-semibold tracking-tight">Actions</h2>
-      <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-        Events only wake @{agent.handle}; its answer in the thread needs no tool. To let it
-        do more in Slack — post to a channel, DM someone, read a channel or a thread, look
-        people up — connect its Slack tools, the same as any server under Access. They use
-        the app already installed, so there is nothing to authorize. Each tool is off until
-        you allow it, and a tool that needs a permission the install lacks means a
-        reinstall.
-      </p>
-
-      {authorized ? (
-        <Link
-          href={`/app/${agent.id}/access/slack`}
-          className="group mt-4 flex items-center justify-between gap-4 rounded-xl border border-emerald-300/70 bg-emerald-50/40 px-5 py-4 transition-all hover:-translate-y-0.5 hover:border-emerald-400/80 hover:shadow-sm dark:border-emerald-800/60 dark:bg-emerald-950/20"
-        >
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <Dot tone="emerald">Slack tools connected</Dot>
-            </div>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {tools.length === 0
-                ? "No tools reported yet."
-                : `${allowedTools.length} of ${tools.length} tools allowed`}
-              {send
-                ? send.allowed
-                  ? send.requiresApproval
-                    ? " · may send messages, with approval"
-                    : " · may send messages without approval"
-                  : " · may not send messages yet"
-                : null}
-            </p>
-          </div>
-          <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-emerald-800 dark:text-emerald-300">
-            Manage tools
-            <ChevronRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
-          </span>
-        </Link>
-      ) : (
-        <div className="mt-4">
-          <ConnectSlackToolsButton agentId={agent.id} />
-        </div>
-      )}
-    </section>
   );
 }
 

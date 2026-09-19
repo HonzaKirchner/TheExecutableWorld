@@ -119,7 +119,8 @@ function NewAgentForm({ needsConfigToken }: { needsConfigToken: boolean }) {
                   Your App Configuration Tokens
                 </a>{" "}
                 while signed in to this workspace, then paste the refresh token
-                here. You only do this once.
+                here. You only do this once — a temporary step until Slack grants
+                this over OAuth.
               </p>
             </div>
           </div>

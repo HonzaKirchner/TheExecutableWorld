@@ -300,9 +300,48 @@ export async function listAgentSessions(
   }));
 }
 
-/** Where a transcript lives. Short, because it gets pasted into Slack. */
+/**
+ * One of the agent's sessions, for its signed-in pages. Scoped by agent, and
+ * the caller has scoped the agent by workspace — so a session id from another
+ * workspace reads as "not found" here, unlike at the public link.
+ */
+export async function getAgentSession(
+  agentId: string,
+  sessionId: string,
+): Promise<SessionSummary | null> {
+  if (!isUuid(sessionId)) return null;
+  await ensureSchema();
+  const sql = db();
+
+  const rows = (await sql.query(
+    `select s.id, s.agent_id, a.handle, s.trigger_kind, s.title, s.status,
+            s.error, s.started_at, s.ended_at,
+            (select count(*) from agent_session_events e where e.session_id = s.id)
+              as event_count
+     from agent_sessions s
+     join agents a on a.id = s.agent_id
+     where s.agent_id = $1 and s.id = $2
+     limit 1`,
+    [agentId, sessionId],
+  )) as (SessionRow & { event_count: string })[];
+
+  const row = rows[0];
+  return row ? { ...toSession(row), agentId: row.agent_id, eventCount: Number(row.event_count) } : null;
+}
+
+/** Where the public transcript lives. Short, because it gets pasted into Slack. */
 export function sessionPath(sessionId: string) {
   return `/s/${sessionId}`;
+}
+
+/** The agent's sessions, inside the signed-in app. */
+export function agentSessionsPath(agentId: string) {
+  return `/app/${agentId}/sessions`;
+}
+
+/** One session, inside the signed-in app. */
+export function agentSessionPath(agentId: string, sessionId: string) {
+  return `${agentSessionsPath(agentId)}/${sessionId}`;
 }
 
 const UUID_RE =

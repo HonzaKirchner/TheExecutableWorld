@@ -20,6 +20,8 @@ Next.js (App Router) + Tailwind v4 + shadcn/ui, with Slack sign-in via Auth.js. 
 | `/api/stripe/connect/callback`       | Where Stripe Connect sends people back to                      |
 | `/api/stripe/events`                 | The platform's Connect webhook — events from every connected Stripe account |
 | `/s/[sessionId]`                     | One run's transcript, live while it runs — readable without signing in |
+| `/app/[agentId]/sessions`            | Every run of the agent                                         |
+| `/app/[agentId]/sessions/[sessionId]` | One run's transcript, inside the app                          |
 | `/api/sessions/[sessionId]/events`   | The transcript feed the live view polls                        |
 
 Everything under `/app` is gated by [src/proxy.ts](src/proxy.ts); signed-out visitors are sent to `/` with a `callbackUrl`, and signed-in visitors hitting `/` go straight to `/app`.
@@ -240,8 +242,15 @@ undistributed, and so impossible for that customer to install. So the pair is st
 workspace in `slack_config_tokens` (one row per Slack team id), and there is no
 environment fallback.
 
-A workspace with no pair can't create agents. The "New agent" dialog notices and asks for
-a refresh token before the rest of the form; `/app` passes `needsConfigToken` to
+A workspace with no pair can't create agents, so the app asks for one as soon as someone
+signs in: the `/app` layout checks `hasConfigToken` and, when there is none, opens
+[src/components/workspace-setup-dialog.tsx](src/components/workspace-setup-dialog.tsx) —
+the steps for generating the pair at api.slack.com, a field for the refresh token, and a
+note that this is a stopgap: Slack can grant the same permission over its usual OAuth
+flow, but that grant has to be arranged with Slack's support, so the pasted token stands
+in until then. "Later" puts the dialog away for the tab (`sessionStorage`), and the
+"New agent" dialog then asks for the token before the rest of its form instead; `/app`
+passes `needsConfigToken` to
 [src/components/new-agent-dialog.tsx](src/components/new-agent-dialog.tsx). Whoever pastes
 it must have generated it while signed in to *that* workspace — nothing here can check
 that, but a token from elsewhere puts the apps in the wrong place again.
@@ -290,9 +299,11 @@ need more than that. [src/lib/slack-access.ts](src/lib/slack-access.ts) is where
 manifest, the install's scopes and the tools meet: it builds the manifest from the
 trigger and the allowed tools, and computes the scopes an install has to ask for.
 
-The trigger page offers the install too, for anyone who gets there before installing;
-events can be chosen either way, and an install after the choice asks for exactly what
-it needs. The destination of an install rides inside the OAuth `state` —
+Events are chosen before or after the install, whichever comes first; an install after
+the choice asks for exactly what it needs, and the install panel at the bottom of the
+agent's page is the one place that talks about installing. Until the app is installed
+nothing can wake the agent, so the page shows no sessions section either. The
+destination of an install rides inside the OAuth `state` —
 `<random>.agent` or `<random>.trigger`, a suffix Slack returns verbatim
 ([src/lib/slack-install.ts](src/lib/slack-install.ts)) — so the install panel at the
 bottom of the agent's page keeps landing on the agent's page. A `state` without a
@@ -432,8 +443,13 @@ A Gmail trigger wakes the agent when mail lands in a mailbox. Gmail has no webho
 own: `users.watch` makes it publish to a **Google Cloud Pub/Sub topic**, and a push
 subscription on that topic delivers to this app. The trigger rides on the agent's **Gmail
 MCP connection** (below): the tokens Google issued for the tools are the ones the watch
-uses, so a Google account is granted to an agent once, under Access, and the trigger then
-needs only to be started.
+uses, so a Google account is granted once, under Access, and the trigger then needs only
+to be started. Granted once *per workspace*, in fact: an agent with no Gmail connection
+of its own takes over the grant another agent of the workspace holds — its row gets a
+copy of that row's tokens, checked against Google first
+([src/lib/gmail/connection.ts](src/lib/gmail/connection.ts)) — so "Connect Gmail" on the
+second agent finishes on the spot and its trigger offers **Start listening** right away.
+Only a workspace with no grant at all is sent to Google's consent screen.
 
 Setting up Google (once):
 
@@ -558,8 +574,12 @@ into transcript lines — opening a session before the run, wiring `onEvent` to
 `appendSessionEvent`, and closing it with the reply (Slack) or a note (Stripe), `done` or
 `failed` depending on how the run and, for Slack, the post to the thread went.
 
-An agent's recent runs are listed on its page, newest first, each linking to its
-transcript.
+Inside the app, runs have pages of their own: `/app/[agentId]/sessions` lists every run
+of an agent, newest first, and `/app/[agentId]/sessions/[sessionId]` shows one — the same
+transcript as the public link, behind the sign-in gate and scoped to the workspace
+(`getAgentSession`), with a **Copy share link** button that hands out the `/s/<id>` URL.
+The agent's page shows its latest few with a way to the full list, and every card on the
+agents list links straight to that agent's sessions.
 
 ### Live
 
@@ -623,15 +643,18 @@ over `https://localhost:3003`, whose certificate Node doesn't trust out of the b
 no OAuth of its own. Every agent's Slack app is installed with a bot token, and the tools
 — send a message or DM, list and join channels, read a channel or a thread, find a person,
 react — call Slack's Web API with whatever bearer token is on the request, checked with
-`auth.test`. **Connect** therefore needs the app installed and nothing else:
-`seedSlackConnection` creates the connection row and writes the bot token into it as the
-token pair, and every later connection (the tool page, a run) speaks with it; a reinstall
-writes the new token in. Each tool needs bot scopes of its own
-([src/lib/slack-tools-catalog.ts](src/lib/slack-tools-catalog.ts)), asked for only once
-the tool is allowed: saving access to the Slack server updates the manifest first, as
-saving events does, and the agent's page asks for a reinstall while the install lacks
-something. A tool called before that reinstall answers with Slack's `missing_scope`,
-turned into a tool error that says so. The Slack trigger's page carries the same card
+`auth.test`. **Connect** asks nothing of anyone: the tool list is the catalog in
+[src/lib/slack-tools-catalog.ts](src/lib/slack-tools-catalog.ts) — the server registers
+exactly those tools, taking their titles, descriptions and annotations from it — so
+`ensureSlackConnection` creates the connection row, syncs the catalog into `mcp_tools`
+and, if the app is installed, writes the bot token into the row as the token pair. That
+is what lets Slack tools (like Slack events) be chosen *before* the app is installed:
+each tool needs bot scopes of its own, listed in the catalog, and saving access to the
+Slack server updates the manifest first, as saving events does, so the one install asks
+for everything at once. After an install the callback writes the new token in; a tool
+allowed later means the agent's page asks for a reinstall, and a tool called before that
+reinstall answers with Slack's `missing_scope`, turned into a tool error that says so.
+The tool page never contacts the server for Slack either — the catalog is the list. The Slack trigger's page carries the same card
 under **Actions**, as Stripe's does, since being woken by Slack and acting in it are two
 grants.
 
@@ -735,6 +758,6 @@ src/
   components/
     access/                     Access section, connect card, tool form, install panel
     triggers-section.tsx        Triggers section
-    sessions/                    Sessions list, transcript + its polling
+    sessions/                    Session rows, one run's view, transcript + its polling, share link
     ui/                         shadcn/ui primitives
 ```

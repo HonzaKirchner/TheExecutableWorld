@@ -1,8 +1,9 @@
 import Link from "next/link";
-import { Bot } from "lucide-react";
+import { Bot, History } from "lucide-react";
 
 import { auth } from "@/auth";
 import { listAgents } from "@/lib/agents";
+import { agentSessionsPath } from "@/lib/sessions";
 import { hasConfigToken } from "@/lib/slack-config-token";
 import { NewAgentDialog } from "@/components/new-agent-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -51,26 +52,36 @@ export default async function AgentsPage() {
               className="animate-in fade-in slide-in-from-bottom-1 duration-500 [animation-fill-mode:backwards]"
               style={{ animationDelay: `${i * 40}ms` }}
             >
-              <Link
-                href={`/app/${agent.id}`}
-                className="group flex h-full flex-col rounded-xl border bg-card p-5 transition-all hover:-translate-y-0.5 hover:border-border/80 hover:shadow-sm"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <h2 className="min-w-0 truncate font-medium transition-colors group-hover:text-foreground">
-                    <span className="text-muted-foreground">@</span>
-                    {agent.handle}
-                  </h2>
-                  <Badge variant="secondary" className="shrink-0 font-mono text-[10px]">
-                    {agent.model}
-                  </Badge>
-                </div>
+              {/*
+                Two links, side by side rather than nested: the card opens the
+                agent, its footer opens the agent's sessions.
+              */}
+              <div className="flex h-full flex-col overflow-hidden rounded-xl border bg-card transition-all hover:-translate-y-0.5 hover:border-border/80 hover:shadow-sm">
+                <Link href={`/app/${agent.id}`} className="group flex flex-1 flex-col p-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <h2 className="min-w-0 truncate font-medium transition-colors group-hover:text-foreground">
+                      <span className="text-muted-foreground">@</span>
+                      {agent.handle}
+                    </h2>
+                    <Badge variant="secondary" className="shrink-0 font-mono text-[10px]">
+                      {agent.model}
+                    </Badge>
+                  </div>
 
-                {agent.description ? (
-                  <p className="mt-2 line-clamp-2 text-sm text-muted-foreground">
-                    {agent.description}
-                  </p>
-                ) : null}
-              </Link>
+                  {agent.description ? (
+                    <p className="mt-2 line-clamp-2 text-sm text-muted-foreground">
+                      {agent.description}
+                    </p>
+                  ) : null}
+                </Link>
+                <Link
+                  href={agentSessionsPath(agent.id)}
+                  className="flex items-center gap-1.5 border-t px-5 py-2.5 text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+                >
+                  <History className="size-3.5" />
+                  Sessions
+                </Link>
+              </div>
             </li>
           ))}
         </ul>

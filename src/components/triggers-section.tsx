@@ -44,7 +44,11 @@ export function TriggersSection({
 }: {
   agent: Agent;
   triggers: Trigger[];
-  /** Whether the agent's Gmail MCP connection is authorized — the Gmail trigger listens through it. */
+  /**
+   * Whether a Google account is there to listen on: the agent's own Gmail
+   * connection, or one another agent of the workspace holds, which the
+   * trigger takes over when it starts.
+   */
   gmailConnected: boolean;
   /** The workspace's Stripe account, shared by all its agents; null until one is connected. */
   stripeConnection: StripeConnection | null;
@@ -209,21 +213,12 @@ function describe(
   stripeConnection: StripeConnection | null,
 ): { tone: Tone; label: string; hint?: string } {
   if (kind === "slack") {
-    if (!trigger) {
-      return {
-        tone: "muted",
-        label: "Not listening",
-        hint: agent.slackInstalledAt
-          ? `Choose the Slack events that wake @${agent.handle}.`
-          : `Choose the events that should wake @${agent.handle}; they start arriving once the app is installed.`,
-      };
-    }
-    return agent.slackInstalledAt
+    return trigger
       ? { tone: "emerald", label: "Active" }
       : {
-          tone: "amber",
-          label: "Not installed",
-          hint: "The events are chosen. Install the app from the panel below and they start arriving.",
+          tone: "muted",
+          label: "Not listening",
+          hint: `Choose the Slack events that wake @${agent.handle}.`,
         };
   }
 
@@ -237,7 +232,7 @@ function describe(
     }
     if (!trigger || trigger.status === "pending") {
       return gmailConnected
-        ? { tone: "muted", label: "Not listening", hint: "Gmail is connected. Start listening to wake the agent on new mail." }
+        ? { tone: "muted", label: "Not listening", hint: "A Google account is connected. Start listening to wake the agent on new mail." }
         : { tone: "muted", label: "Not connected", hint: "Connect the agent's Google account; it starts listening for new mail right away." };
     }
     if (trigger.status === "disconnected") {

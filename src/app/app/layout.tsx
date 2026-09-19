@@ -1,11 +1,19 @@
 import Link from "next/link";
 
 import { auth } from "@/auth";
+import { hasConfigToken } from "@/lib/slack-config-token";
 import { UserMenu } from "@/components/user-menu";
+import { WorkspaceSetupDialog } from "@/components/workspace-setup-dialog";
 import { Toaster } from "@/components/ui/sonner";
 
 export default async function AppLayout({ children }: LayoutProps<"/app">) {
   const session = await auth();
+  const workspaceId = session?.slack?.teamId;
+
+  // A workspace can't create agents until someone has pasted its app
+  // configuration token, so the first thing a signed-in person sees in a
+  // workspace without one is the dialog that asks for it.
+  const needsSetup = workspaceId ? !(await hasConfigToken(workspaceId)) : false;
 
   return (
     <div className="flex min-h-full flex-1 flex-col">
@@ -31,6 +39,8 @@ export default async function AppLayout({ children }: LayoutProps<"/app">) {
       </header>
 
       <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">{children}</main>
+
+      {needsSetup ? <WorkspaceSetupDialog teamName={session?.slack?.teamName} /> : null}
 
       <Toaster position="bottom-center" />
     </div>

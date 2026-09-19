@@ -28,9 +28,10 @@ import {
   type McpConnection,
 } from "@/lib/mcp/connections";
 import { suggestApproval } from "@/lib/mcp/tools";
+import { ensureGmailConnection } from "@/lib/gmail/connection";
 import { stopGmailWatch } from "@/lib/gmail/watch";
 import { SlackApiError } from "@/lib/slack";
-import { seedSlackConnection, SlackAccessError, syncSlackManifest } from "@/lib/slack-access";
+import { ensureSlackConnection, syncSlackManifest } from "@/lib/slack-access";
 import { SlackConfigTokenError } from "@/lib/slack-config-token";
 import { parseInstallReturnTo, startSlackInstall } from "@/lib/slack-install";
 import { getTrigger } from "@/lib/triggers";
@@ -52,9 +53,13 @@ export type CustomServerState = {
  * default, or the trigger's page when the connection was started from its
  * card (see `landingAfterConnect`).
  *
- * Slack is the one server with nothing to authorize: the connection is
- * seeded with the bot token the agent's Slack install granted, so it needs
- * the app installed and nothing else.
+ * Slack is the one server with nothing to authorize and nothing to ask: its
+ * tool list is a catalog in this codebase and its token is the agent's own
+ * bot token, so the connection is made on the spot — installed or not — and
+ * the person lands on the tool list. Gmail skips the consent screen too
+ * whenever another agent of the workspace already holds a Google grant: the
+ * new agent takes that grant over (src/lib/gmail/connection.ts), and only a
+ * workspace with none is sent to Google.
  */
 export async function connectMcpServerAction(
   _previous: AccessActionState,
@@ -76,23 +81,24 @@ export async function connectMcpServerAction(
   }
   if (!server) return { error: "That server isn't supported." };
 
-  let connection: McpConnection;
+  const returnTo = parseMcpReturnTo(formData.get("returnTo"));
   if (server.id === "slack") {
-    try {
-      connection = await seedSlackConnection(agent);
-    } catch (error) {
-      if (error instanceof SlackAccessError) return { error: error.message };
-      throw error;
-    }
-  } else {
-    connection = await upsertConnection({
-      agentId: agent.id,
-      serverId: server.id,
-      serverUrl: server.url,
-    });
+    await ensureSlackConnection(agent);
+    revalidatePath(`/app/${agent.id}`);
+    redirect(await landingAfterConnect(agent.id, server.id, returnTo));
+  }
+  if (server.id === "gmail" && (await ensureGmailConnection(agent.id))) {
+    revalidatePath(`/app/${agent.id}`);
+    redirect(await landingAfterConnect(agent.id, server.id, returnTo));
   }
 
-  const failure = await establish(agent, connection, server, parseMcpReturnTo(formData.get("returnTo")));
+  const connection = await upsertConnection({
+    agentId: agent.id,
+    serverId: server.id,
+    serverUrl: server.url,
+  });
+
+  const failure = await establish(agent, connection, server, returnTo);
   return failure ? { error: failure } : {};
 }
 
