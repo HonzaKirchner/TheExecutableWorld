@@ -12,7 +12,14 @@ declare module "next-auth" {
 }
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  providers: [Slack],
+  providers: [
+    // Auth.js would otherwise look for AUTH_SLACK_ID / AUTH_SLACK_SECRET.
+    // We pass these explicitly so the env vars keep Slack's own naming.
+    Slack({
+      clientId: process.env.SLACK_CLIENT_ID,
+      clientSecret: process.env.SLACK_CLIENT_SECRET,
+    }),
+  ],
   session: { strategy: "jwt" },
   pages: {
     signIn: "/",

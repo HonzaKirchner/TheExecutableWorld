@@ -3,10 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --port 3003",
     "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
+    "start": "next start --port 3003",
+    "lint": "eslint",
+    "env:pull": "npx --yes vercel@latest env pull .env.local --environment=production --yes"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",
