@@ -18,6 +18,8 @@ Next.js (App Router) + Tailwind v4 + shadcn/ui, with Slack sign-in via Auth.js. 
 | `/app/[agentId]/triggers/[kind]`     | A trigger's detail: connect (Stripe), choose events            |
 | `/api/stripe/connect/callback`       | Where Stripe Connect sends people back to                      |
 | `/api/stripe/events`                 | The platform's Connect webhook — events from every connected Stripe account |
+| `/s/[sessionId]`                     | One run's transcript, live while it runs — readable without signing in |
+| `/api/sessions/[sessionId]/events`   | The transcript feed the live view polls                        |
 
 Everything under `/app` is gated by [src/proxy.ts](src/proxy.ts); signed-out visitors are sent to `/` with a `callbackUrl`, and signed-in visitors hitting `/` go straight to `/app`.
 
@@ -150,6 +152,8 @@ Seven tables, created by [src/lib/db.ts](src/lib/db.ts):
 | `triggers`            | `uuid`, unique per (agent, kind) | What makes an agent act: `config.events`, `status`, and for Stripe the connected `account_id` and the last event seen |
 | `stripe_webhook_endpoint` | `'default'`           | The platform's one Connect webhook endpoint at Stripe, with its signing secret |
 | `slack_config_tokens` | Slack team id             | That workspace's current app configuration token pair — the workspace its agents' Slack apps are created in |
+| `agent_sessions`      | `uuid`                    | One run of an agent: which trigger woke it, a one-line title, `running`/`done`/`failed` |
+| `agent_session_events`| (session, `seq`)          | The transcript — `seq` is gap-free per session, so it doubles as the live view's cursor |
 
 ### Secrets are encrypted
 
@@ -512,6 +516,42 @@ event object in the message. There is nowhere to reply — no thread, no person 
 so the run is the point and whatever the agent says at the end only reaches the logs.
 Giving an agent somewhere to report is a setting that doesn't exist yet.
 
+## Sessions
+
+A session is one run of an agent: a trigger woke it, `runAgent` did some things, it
+stopped. Each gets a random uuid, and that uuid is the whole address of its transcript —
+`/s/<id>` is outside the gate in [src/proxy.ts](src/proxy.ts) and renders for anyone with
+the link, signed in or not. That's the point: you can paste a run at someone with no
+account here and show them what the agent did. **Nothing in a transcript is private**, so
+only text meant to be read goes into one — no tokens, no raw webhook payloads, no
+instructions, and on the Stripe side not even the event object, which can carry a
+customer's name and amount. [src/lib/sessions.ts](src/lib/sessions.ts) says so at the
+top, and the write helpers (`startSession`, `appendSessionEvent`, `finishSession`) are
+the only way in — each one query, since a Slack run starts inside the three-second
+webhook budget.
+
+`runAgent` itself stays trigger-agnostic (see above): it takes an optional `onEvent`
+callback and reports each tool call and result to it as they happen, without knowing
+that sessions exist. [src/lib/agent/slack.ts](src/lib/agent/slack.ts) and
+[src/lib/agent/stripe.ts](src/lib/agent/stripe.ts) are the only callers that turn those
+into transcript lines — opening a session before the run, wiring `onEvent` to
+`appendSessionEvent`, and closing it with the reply (Slack) or a note (Stripe), `done` or
+`failed` depending on how the run and, for Slack, the post to the thread went.
+
+An agent's recent runs are listed on its page, newest first, each linking to its
+transcript.
+
+### Live
+
+The page server-renders the transcript as it stands, then polls
+`/api/sessions/<id>/events?after=<seq>` about once a second while the run is `running`,
+slowing down when nothing is happening and giving up after a few quiet minutes — a run
+that dies without closing its session shouldn't be polled forever. Polling rather than
+SSE: this runs on serverless functions talking to the database over HTTP, where holding a
+stream open costs an invocation for the length of the run, and a cursor poll costs one
+small query. Without JavaScript the page still shows the transcript, just not the rest of
+it.
+
 ## Giving an agent access
 
 The **Access** section on an agent's page lists the MCP servers in
@@ -622,6 +662,8 @@ src/
     api/slack/install/callback/ Slack install callback
     api/slack/events/[triggerId]/ Slack Events API webhook
     api/stripe/events/          Stripe Connect webhook
+    s/[sessionId]/page.tsx      A run's transcript, public and live
+    api/sessions/[sessionId]/events/ Transcript feed for the live view
   lib/
     db.ts                       Neon client + schema
     base-url.ts                 Origin for redirect URLs
@@ -633,6 +675,7 @@ src/
     slack-install.ts            Install URL + oauth.v2.access
     slack-events.ts             Signature check, event shapes, reply
     triggers.ts                 Trigger catalog + queries
+    sessions.ts                  Sessions + transcripts (public by design)
     agent/
       run.ts                    The harness: one model call loop, trigger-agnostic
       providers.ts              Model id -> provider client (the only @ai-sdk/* import)
@@ -649,5 +692,6 @@ src/
   components/
     access/                     Access section, connect card, tool form, install panel
     triggers-section.tsx        Triggers section
+    sessions/                    Sessions list, transcript + its polling
     ui/                         shadcn/ui primitives
 ```

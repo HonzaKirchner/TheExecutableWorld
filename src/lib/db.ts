@@ -338,4 +338,45 @@ async function createSchema() {
     end
     $$
   `;
+
+  // One run of an agent: something triggered it, it did some things, it
+  // finished. The id is the whole of the transcript's address — /s/<id> is
+  // readable by anyone who has the link, with no sign-in — so it is a random
+  // uuid and nothing about it is guessable from the agent or the workspace.
+  await sql`
+    create table if not exists agent_sessions (
+      id            uuid primary key default gen_random_uuid(),
+      agent_id      uuid not null references agents (id) on delete cascade,
+      trigger_id    uuid references triggers (id) on delete set null,
+      trigger_kind  text not null,
+      -- One line for the header: who said what, or which event arrived.
+      title         text,
+      status        text not null default 'running',
+      error         text,
+      started_at    timestamptz not null default now(),
+      ended_at      timestamptz
+    )
+  `;
+
+  await sql`
+    create index if not exists agent_sessions_agent_idx
+      on agent_sessions (agent_id, started_at desc)
+  `;
+
+  // The transcript. `seq` is per session and gap-free, which is what makes it
+  // a cursor: the live view asks for everything after the highest seq it has.
+  // Everything here is served without authentication, so only text meant to be
+  // read by whoever holds the link belongs in `body` and `data`.
+  await sql`
+    create table if not exists agent_session_events (
+      session_id  uuid not null references agent_sessions (id) on delete cascade,
+      seq         integer not null,
+      type        text not null,
+      role        text,
+      body        text,
+      data        jsonb,
+      created_at  timestamptz not null default now(),
+      primary key (session_id, seq)
+    )
+  `;
 }
