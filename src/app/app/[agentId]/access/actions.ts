@@ -31,7 +31,7 @@ import {
 import { suggestApproval } from "@/lib/mcp/tools";
 import { ensureGmailConnection } from "@/lib/gmail/connection";
 import { stopGmailWatch } from "@/lib/gmail/watch";
-import { SlackApiError } from "@/lib/slack";
+import { describeSlackErrors, SlackApiError } from "@/lib/slack";
 import { ensureSlackConnection, syncSlackManifest } from "@/lib/slack-access";
 import { SlackConfigTokenError } from "@/lib/slack-config-token";
 import { parseInstallReturnTo, startSlackInstall } from "@/lib/slack-install";
@@ -299,10 +299,16 @@ export async function saveAuditSettingsAction(
   if ("error" in agent) return agent;
 
   const channelId = str(formData.get("auditChannelId")) || null;
-  const whitelist = str(formData.get("approvalWhitelist"))
-    .split(/[\s,]+/)
-    .map((id) => id.trim())
-    .filter(Boolean);
+  // One field per person from the picker, or one comma-separated field from
+  // the typed fallback; both read the same here.
+  const whitelist = [
+    ...new Set(
+      strings(formData.getAll("approvalWhitelist"))
+        .flatMap((value) => value.split(/[\s,]+/))
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ];
 
   await setAuditSettings(agent.id, { channelId, whitelist });
 
@@ -346,7 +352,8 @@ export async function installSlackAppAction(
 function slackManifestFailure(error: unknown) {
   if (error instanceof SlackConfigTokenError) return error.message;
   if (error instanceof SlackApiError) {
-    return `Slack rejected the app's new permissions (${error.code}). Nothing was saved.`;
+    const reason = describeSlackErrors(error.details);
+    return `Slack rejected the app's new permissions (${error.code}${reason ? `: ${reason}` : ""}). Nothing was saved.`;
   }
   return error instanceof Error ? error.message : "Slack could not be updated.";
 }

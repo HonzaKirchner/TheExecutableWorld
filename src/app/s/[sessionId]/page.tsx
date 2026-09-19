@@ -1,8 +1,16 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
+import { ArrowLeft } from "lucide-react";
 
-import { getSession, listSessionEvents } from "@/lib/sessions";
+import { auth } from "@/auth";
+import {
+  agentSessionsPath,
+  getSession,
+  getSessionAgentId,
+  listSessionEvents,
+} from "@/lib/sessions";
 import { SessionView } from "@/components/sessions/session-view";
 
 /**
@@ -38,10 +46,29 @@ export default async function SessionPage({ params }: PageProps<"/s/[sessionId]"
   const session = await getSession(sessionId);
   if (!session) notFound();
 
-  const events = await listSessionEvents(sessionId);
+  // Someone who followed the link out of Slack and is signed in here should
+  // be able to get to the rest of the agent's runs, not just this one. The
+  // link only appears when the agent is in their workspace; the transcript
+  // itself is shown to everyone regardless.
+  const viewer = await auth();
+  const workspaceId = viewer?.slack?.teamId;
+  const [events, agentId] = await Promise.all([
+    listSessionEvents(sessionId),
+    workspaceId ? getSessionAgentId(sessionId, workspaceId) : Promise.resolve(null),
+  ]);
 
   return (
     <main className="animate-in fade-in mx-auto w-full max-w-3xl px-6 py-12 duration-500 sm:py-16">
+      {agentId ? (
+        <Link
+          href={agentSessionsPath(agentId)}
+          className="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ArrowLeft className="size-4" />
+          Sessions
+        </Link>
+      ) : null}
+
       <SessionView session={session} events={events} />
 
       <p className="mt-10 border-t pt-4 text-xs text-muted-foreground">

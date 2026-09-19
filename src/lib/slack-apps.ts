@@ -2,7 +2,7 @@ import { DESCRIPTION_MAX } from "@/lib/agent-limits";
 import { baseUrl } from "@/lib/base-url";
 import { getConfigAccessToken } from "@/lib/slack-config-token";
 import { botScopesFor, normalizeSlackEvents } from "@/lib/slack-events-catalog";
-import { slackPost } from "@/lib/slack";
+import { SlackApiError, slackPost } from "@/lib/slack";
 
 export type SlackAppCredentials = {
   appId: string;
@@ -54,22 +54,29 @@ export async function createSlackApp(
   input: ManifestInput,
 ): Promise<SlackAppCredentials> {
   const token = await getConfigAccessToken(workspaceId);
+  const manifest = buildManifest(input);
 
-  const response = await slackPost<{
-    ok: true;
-    app_id: string;
-    credentials: {
-      client_id: string;
-      client_secret: string;
-      signing_secret: string;
-      verification_token: string;
-    };
-    oauth_authorize_url: string;
-  }>("apps.manifest.create", {
-    token,
-    // The manifest goes over as a JSON *string*, not as a nested object.
-    form: { manifest: JSON.stringify(buildManifest(input)) },
-  });
+  let response;
+  try {
+    response = await slackPost<{
+      ok: true;
+      app_id: string;
+      credentials: {
+        client_id: string;
+        client_secret: string;
+        signing_secret: string;
+        verification_token: string;
+      };
+      oauth_authorize_url: string;
+    }>("apps.manifest.create", {
+      token,
+      // The manifest goes over as a JSON *string*, not as a nested object.
+      form: { manifest: JSON.stringify(manifest) },
+    });
+  } catch (error) {
+    logRejectedManifest("apps.manifest.create", null, manifest, error);
+    throw error;
+  }
 
   return {
     appId: response.app_id,
@@ -96,9 +103,30 @@ export async function updateSlackApp(
   input: ManifestInput,
 ) {
   const token = await getConfigAccessToken(workspaceId);
-  await slackPost("apps.manifest.update", {
-    token,
-    form: { app_id: appId, manifest: JSON.stringify(buildManifest(input)) },
+  const manifest = buildManifest(input);
+  try {
+    await slackPost("apps.manifest.update", {
+      token,
+      form: { app_id: appId, manifest: JSON.stringify(manifest) },
+    });
+  } catch (error) {
+    logRejectedManifest("apps.manifest.update", appId, manifest, error);
+    throw error;
+  }
+}
+
+/**
+ * Slack's `invalid_manifest` errors point into the manifest by JSON pointer,
+ * which is only useful next to the manifest itself — so the one that was
+ * sent goes to the server logs. It holds no secrets: names, URLs and scopes.
+ */
+function logRejectedManifest(method: string, appId: string | null, manifest: unknown, error: unknown) {
+  if (!(error instanceof SlackApiError)) return;
+  console.error(`[slack] ${method} rejected the manifest`, {
+    appId,
+    code: error.code,
+    errors: error.details,
+    manifest,
   });
 }
 
@@ -128,9 +156,6 @@ export function buildManifest({
         messages_tab_enabled: true,
         messages_tab_read_only_enabled: false,
       },
-      ...(interactivityUrl
-        ? { interactivity: { is_enabled: true, request_url: interactivityUrl } }
-        : {}),
     },
     oauth_config: {
       scopes: { bot: botScopesFor(bot_events, tools) },
@@ -139,6 +164,11 @@ export function buildManifest({
     settings: {
       org_deploy_enabled: false,
       socket_mode_enabled: false,
+      // Interactivity lives under `settings`, next to event subscriptions —
+      // Slack answers `invalid_manifest` to an unknown key under `features`.
+      ...(interactivityUrl
+        ? { interactivity: { is_enabled: true, request_url: interactivityUrl } }
+        : {}),
       // Slack verifies the URL with a challenge when it lands in the
       // manifest, so the endpoint has to be deployed before an agent can
       // subscribe to events.

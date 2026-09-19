@@ -9,7 +9,7 @@ import { GmailApiError } from "@/lib/gmail/api";
 import { GoogleAuthError, isGmailTriggerConfigured } from "@/lib/gmail/google";
 import { GmailWatchError, startGmailWatch, stopGmailWatch } from "@/lib/gmail/watch";
 import { DEFAULT_GMAIL_EVENTS, normalizeGmailEvents } from "@/lib/gmail-events";
-import { SlackApiError } from "@/lib/slack";
+import { describeSlackErrors, SlackApiError } from "@/lib/slack";
 import { syncSlackManifest } from "@/lib/slack-access";
 import { SlackConfigTokenError } from "@/lib/slack-config-token";
 import { normalizeSlackEvents } from "@/lib/slack-events-catalog";
@@ -294,7 +294,8 @@ function slackFailure(error: unknown) {
   // can be gone or expired by now. Its own message says how to replace it.
   if (error instanceof SlackConfigTokenError) return error.message;
   if (error instanceof SlackApiError) {
-    return `Slack rejected the change (${error.code}).`;
+    const reason = describeSlackErrors(error.details);
+    return `Slack rejected the change (${error.code}${reason ? `: ${reason}` : ""}).`;
   }
   return error instanceof Error ? error.message : "Slack could not be updated.";
 }

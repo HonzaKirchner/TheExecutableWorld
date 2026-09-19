@@ -207,6 +207,27 @@ export async function createAgent(input: {
   return toAgent(rows[0]);
 }
 
+/**
+ * What a person changes about an agent after making it: what it follows,
+ * what it runs on, and its one-line summary. The handle stays — it is the
+ * Slack app's name and the bot's. Returns the agent as it now reads.
+ */
+export async function updateAgentProfile(
+  agentId: string,
+  input: { description: string | null; instructions: string | null; model: string },
+): Promise<Agent | null> {
+  await ensureSchema();
+  const sql = db();
+  const rows = (await sql.query(
+    `update agents
+     set description = $2, instructions = $3, model = $4, updated_at = now()
+     where id = $1
+     returning ${AGENT_COLUMNS}`,
+    [agentId, input.description, input.instructions, input.model],
+  )) as AgentRow[];
+  return rows[0] ? toAgent(rows[0]) : null;
+}
+
 /** Removes an agent and, by cascade, its connections and triggers. */
 export async function deleteAgent(agentId: string) {
   await ensureSchema();

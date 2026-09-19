@@ -7,11 +7,13 @@ import { getAgent } from "@/lib/agents";
 import { listConnections } from "@/lib/mcp/connections";
 import { isGmailAvailable } from "@/lib/gmail/connection";
 import { allowedSlackTools } from "@/lib/slack-access";
+import { loadSlackDirectory } from "@/lib/slack-directory";
 import { listAgentSessions } from "@/lib/sessions";
 import { missingScopes } from "@/lib/slack-events-catalog";
 import { getStripeConnection } from "@/lib/stripe-connections";
 import { listTriggers } from "@/lib/triggers";
 import { AccessSection } from "@/components/access/access-section";
+import { AgentProfile } from "@/components/agent-profile";
 import { AuditSettingsForm } from "@/components/access/audit-settings-form";
 import { InstallSlackPanel } from "@/components/access/install-slack-panel";
 import { FlashToast } from "@/components/flash-toast";
@@ -54,7 +56,7 @@ export default async function AgentDetailPage({
 
   // Until the app is installed nothing can wake the agent, so there are no
   // sessions to show — and the page shouldn't suggest otherwise.
-  const [connections, triggers, stripeConnection, slackTools, sessions, gmailAvailable] =
+  const [connections, triggers, stripeConnection, slackTools, sessions, gmailAvailable, directory] =
     await Promise.all([
       listConnections(agent.id),
       listTriggers(agent.id),
@@ -62,6 +64,7 @@ export default async function AgentDetailPage({
       allowedSlackTools(agent.id),
       agent.slackInstalledAt ? listAgentSessions(agent.id, RECENT_SESSIONS) : Promise.resolve([]),
       isGmailAvailable(agent),
+      loadSlackDirectory(agent),
     ]);
   const installed = query.installed === "1";
   const slackTrigger = triggers.find((trigger) => trigger.kind === "slack");
@@ -116,16 +119,7 @@ export default async function AgentDetailPage({
       ) : null}
       {cancelled ? <FlashToast message={cancelled} /> : null}
 
-      <section className="mt-8 overflow-hidden rounded-xl border bg-card">
-        <div className="p-6 sm:p-7">
-          <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            Instructions
-          </h2>
-          <p className="mt-3 max-w-3xl text-[15px] leading-7 whitespace-pre-wrap">
-            {agent.instructions ?? "No instructions yet."}
-          </p>
-        </div>
-
+      <AgentProfile agent={agent}>
         <dl className="grid gap-px border-t bg-border sm:grid-cols-3">
         <Field label="Model" value={agent.model} mono />
         <Field
@@ -145,7 +139,7 @@ export default async function AgentDetailPage({
           href={agent.slackAppId ? `https://api.slack.com/apps/${agent.slackAppId}` : undefined}
         />
         </dl>
-      </section>
+      </AgentProfile>
 
       <TriggersSection
         agent={agent}
@@ -160,7 +154,7 @@ export default async function AgentDetailPage({
 
       <AccessSection agent={agent} connections={connections} />
 
-      <AuditSettingsForm agent={agent} />
+      <AuditSettingsForm agent={agent} directory={directory} />
 
       <InstallSlackPanel agent={agent} missingScopes={missing} listening={Boolean(slackTrigger)} />
     </div>

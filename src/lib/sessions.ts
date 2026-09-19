@@ -348,6 +348,31 @@ export async function getAgentSession(
   return row ? { ...toSession(row), agentId: row.agent_id, eventCount: Number(row.event_count) } : null;
 }
 
+/**
+ * The agent a session belongs to, if that agent is in `workspaceId`. The public
+ * transcript page uses this to offer a signed-in viewer the way back into the
+ * app; anyone else gets null and the page stays as bare as the link promised.
+ */
+export async function getSessionAgentId(
+  sessionId: string,
+  workspaceId: string,
+): Promise<string | null> {
+  if (!isUuid(sessionId)) return null;
+  await ensureSchema();
+  const sql = db();
+
+  const rows = (await sql.query(
+    `select s.agent_id
+     from agent_sessions s
+     join agents a on a.id = s.agent_id
+     where s.id = $1 and a.workspace_id = $2
+     limit 1`,
+    [sessionId, workspaceId],
+  )) as { agent_id: string }[];
+
+  return rows[0]?.agent_id ?? null;
+}
+
 /** Where the public transcript lives. Short, because it gets pasted into Slack. */
 export function sessionPath(sessionId: string) {
   return `/s/${sessionId}`;

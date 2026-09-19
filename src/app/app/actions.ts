@@ -11,7 +11,7 @@ import {
 } from "@/lib/agent-limits";
 import { createAgent, isHandleTaken } from "@/lib/agents";
 import { isModelId } from "@/lib/models";
-import { SlackApiError } from "@/lib/slack";
+import { describeSlackErrors, SlackApiError } from "@/lib/slack";
 import {
   SlackConfigTokenError,
   hasConfigToken,
@@ -227,7 +227,7 @@ function slackAppFailureMessage(error: unknown) {
     case "ratelimited":
       return "Slack is rate limiting app creation. Wait a minute and try again.";
     case "invalid_manifest":
-      return `Slack rejected the app manifest: ${describe(error.details)}`;
+      return `Slack rejected the app manifest: ${describeSlackErrors(error.details) || "no details given."}`;
     case "invalid_auth":
     case "not_authed":
     case "token_expired":
@@ -237,14 +237,3 @@ function slackAppFailureMessage(error: unknown) {
   }
 }
 
-function describe(details: unknown) {
-  if (!Array.isArray(details)) return "no details given.";
-  const messages = details
-    .map((detail) =>
-      detail && typeof detail === "object" && "message" in detail
-        ? String((detail as { message: unknown }).message)
-        : null,
-    )
-    .filter(Boolean);
-  return messages.length > 0 ? messages.join("; ") : "no details given.";
-}
